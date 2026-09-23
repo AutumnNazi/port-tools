@@ -1,0 +1,11 @@
+build/
+dist/
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+generated-images/
+.codebuddy/

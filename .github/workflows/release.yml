@@ -1,0 +1,58 @@
+name: Build & Release
+
+on:
+  push:
+    tags: [ "v*" ]
+    branches: [ "main", "master" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, out: PortView-x64.exe }
+          - { arch: x86, out: PortView-x86.exe }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Compile
+        shell: cmd
+        run: |
+          mkdir build
+          cl /nologo /c /O2 /MT /GL /W3 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I src /Fo build\ src\main.c src\ports.c src\proc.c src\ui.c
+          rc /nologo /I src /fo build\app.res src\app.rc
+          link /nologo /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS /OUT:build\PortView.exe build\main.obj build\ports.obj build\proc.obj build\ui.obj build\app.res user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib iphlpapi.lib ws2_32.lib psapi.lib uxtheme.lib
+
+      - name: Rename output
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/PortView.exe "dist/${{ matrix.out }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: dist/${{ matrix.out }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.out }}
+          generate_release_notes: true
