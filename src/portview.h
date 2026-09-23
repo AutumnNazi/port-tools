@@ -22,6 +22,10 @@ typedef struct {
     DWORD pid;
     WCHAR procName[64];
     WCHAR procPath[MAX_PATH];
+    /* 数值列的文本在枚举时一次性格式化好，虚拟列表按需取文本时无需再转换 */
+    WCHAR portText[16];
+    WCHAR rportText[16];
+    WCHAR pidText[16];
 } PORT_ENTRY;
 
 /* 进程快照项（仅名字，取自 Toolhelp，开销极低） */

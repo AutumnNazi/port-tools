@@ -199,26 +199,48 @@ static BOOL ContainsI(const WCHAR *hay, const WCHAR *needle)
 
 /* -------------------------------------------------------------- 数据 */
 
-static void EntryKey(const PORT_ENTRY *e, WCHAR *buf, size_t cch)
+/* 直接比较关键字段来定位同一条连接，避免每行都格式化出一个 key 字符串 */
+static int SameEntry(const PORT_ENTRY *a, const PORT_ENTRY *b)
 {
-    _snwprintf(buf, cch, L"%s|%s|%u|%s|%u|%u",
-               e->proto, e->localAddr, e->localPort,
-               e->remoteAddr, e->remotePort, e->pid);
-    buf[cch - 1] = 0;
+    return a->pid == b->pid &&
+           a->localPort == b->localPort &&
+           a->remotePort == b->remotePort &&
+           _wcsicmp(a->proto, b->proto) == 0 &&
+           _wcsicmp(a->localAddr, b->localAddr) == 0 &&
+           _wcsicmp(a->remoteAddr, b->remoteAddr) == 0;
 }
 
+/* LVS_OWNERDATA 下按需提供单元格文本，文本在 ports.c 枚举时已格式化好 */
+static const WCHAR *CellText(const PORT_ENTRY *e, int col)
+{
+    switch (col) {
+    case COL_PROTO: return e->proto;
+    case COL_LADDR: return e->localAddr;
+    case COL_LPORT: return e->portText;
+    case COL_RADDR: return e->remoteAddr;
+    case COL_RPORT: return e->rportText;
+    case COL_STATE: return e->state;
+    case COL_PID:   return e->pidText;
+    case COL_NAME:  return e->procName;
+    case COL_PATH:  return e->procPath;
+    default:        return L"";
+    }
+}
+
+/* 逐字段匹配，避免为每行拼一个临时大字符串 */
 static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
 {
-    WCHAR buf[1024];
     if (!key || !key[0]) return TRUE;
 
-    _snwprintf(buf, 1024, L"%s %s %u %s %u %s %u %s %s",
-               e->proto, e->localAddr, e->localPort,
-               e->remoteAddr, e->remotePort, e->state,
-               e->pid, e->procName, e->procPath);
-    buf[1023] = 0;
-
-    return ContainsI(buf, key);
+    return ContainsI(e->proto, key) ||
+           ContainsI(e->localAddr, key) ||
+           ContainsI(e->portText, key) ||
+           ContainsI(e->remoteAddr, key) ||
+           ContainsI(e->rportText, key) ||
+           ContainsI(e->state, key) ||
+           ContainsI(e->pidText, key) ||
+           ContainsI(e->procName, key) ||
+           ContainsI(e->procPath, key);
 }
 
 static int CmpEntry(const void *pa, const void *pb)
@@ -266,21 +288,25 @@ static void UpdateStatus(void)
                  (LPARAM)(ProcIsElevated() ? L"管理员" : L"标准用户（部分进程受限）"));
 }
 
+/*
+ * 列表采用 LVS_OWNERDATA（虚拟列表）：这里只负责重算 g_view、同步行数并重绘，
+ * 行文本由 LVN_GETDISPINFO 按需提供。因此刷新不再 DeleteAllItems + 逐行 InsertItem，
+ * 也不会为每行做 8 次 SetItemText。
+ */
 static void ApplyView(void)
 {
-    WCHAR selKey[256], key[256];
     WCHAR filter[256];
-    size_t i, n = 0;
-    int sel = -1, top = 0, newSel = -1;
-    LVITEMW it;
+    PORT_ENTRY selEntry;
+    size_t i, n = 0, oldCount;
+    int sel = -1, top = 0, newSel = -1, haveSel = 0;
 
     /* 记住当前选中项与滚动位置 */
+    oldCount = g_viewCount;
     top = ListView_GetTopIndex(g_hList);
     sel = ListView_GetNextItem(g_hList, -1, LVNI_SELECTED);
     if (sel >= 0 && (size_t)sel < g_viewCount) {
-        EntryKey(&g_view[sel], selKey, 256);
-    } else {
-        selKey[0] = 0;
+        selEntry = g_view[sel];   /* 结构体拷贝，无需格式化成字符串 */
+        haveSel = 1;
     }
 
     GetWindowTextW(g_hEdit, filter, 256);
@@ -301,38 +327,16 @@ static void ApplyView(void)
     }
     g_viewCount = n;
 
-    SendMessage(g_hList, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(g_hList);
+    /* 行数变化才通知列表，之后统一重绘刷新可见区域的内容 */
+    if (n != oldCount) {
+        ListView_SetItemCountEx(g_hList, (int)n, LVSICF_NOINVALIDATEALL);
+    }
+    InvalidateRect(g_hList, NULL, TRUE);
 
-    for (i = 0; i < g_viewCount; ++i) {
-        PORT_ENTRY *e = &g_view[i];
-        WCHAR num[32];
-
-        EntryKey(e, key, 256);
-        if (selKey[0] && _wcsicmp(key, selKey) == 0) newSel = (int)i;
-
-        ZeroMemory(&it, sizeof(it));
-        it.mask = LVIF_TEXT;
-        it.iItem = (int)i;
-        it.iSubItem = 0;
-        it.pszText = e->proto;
-        ListView_InsertItem(g_hList, &it);
-
-        ListView_SetItemText(g_hList, (int)i, COL_LADDR, e->localAddr);
-        _snwprintf(num, 32, L"%u", e->localPort);
-        ListView_SetItemText(g_hList, (int)i, COL_LPORT, num);
-        ListView_SetItemText(g_hList, (int)i, COL_RADDR, e->remoteAddr);
-        if (e->remotePort || e->remoteAddr[0]) {
-            _snwprintf(num, 32, L"%u", e->remotePort);
-        } else {
-            num[0] = 0;
+    if (haveSel) {
+        for (i = 0; i < g_viewCount; ++i) {
+            if (SameEntry(&g_view[i], &selEntry)) { newSel = (int)i; break; }
         }
-        ListView_SetItemText(g_hList, (int)i, COL_RPORT, num);
-        ListView_SetItemText(g_hList, (int)i, COL_STATE, e->state);
-        _snwprintf(num, 32, L"%u", e->pid);
-        ListView_SetItemText(g_hList, (int)i, COL_PID, num);
-        ListView_SetItemText(g_hList, (int)i, COL_NAME, e->procName);
-        ListView_SetItemText(g_hList, (int)i, COL_PATH, e->procPath);
     }
 
     if (newSel >= 0) {
@@ -340,12 +344,10 @@ static void ApplyView(void)
                               LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(g_hList, newSel, FALSE);
     } else if (top > 0 && g_viewCount) {
-        if (top >= (int)g_viewCount) top = (int)g_viewCount - 1;
+        if ((size_t)top >= g_viewCount) top = (int)g_viewCount - 1;
         ListView_EnsureVisible(g_hList, top, TRUE);
     }
 
-    SendMessage(g_hList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_hList, NULL, TRUE);
     UpdateStatus();
 }
 
@@ -451,6 +453,11 @@ typedef struct {
     HFONT hFont;
 } DETAIL_CTX;
 
+static void SetCtlFont(HWND ctl, HFONT font)
+{
+    if (ctl && font) SendMessage(ctl, WM_SETFONT, (WPARAM)font, TRUE);
+}
+
 static void MoveCtl(HWND parent, int id, int x, int y, int w, int h)
 {
     HWND c = GetDlgItem(parent, id);
@@ -466,6 +473,11 @@ static void FillModules(HWND hList, DWORD pid)
     ListView_DeleteAllItems(hList);
 
     if (!ProcEnumModules(pid, &mods, &n) || !mods) {
+        /*
+         * msg 是栈上局部数组：ListView_InsertItem 会在调用期间把字符串拷进自己的
+         * 存储（本列表非 LVS_OWNERDATA），所以函数返回后指针失效是安全的。
+         * 注意：若将来把这个列表改成虚拟列表 / 延迟渲染，就不能再这样传，必须先存到常驻缓冲。
+         */
         WCHAR msg[] = L"无法读取模块列表（需要更高权限，或进程已退出）";
         ZeroMemory(&it, sizeof(it));
         it.mask = LVIF_TEXT;
@@ -512,29 +524,32 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         const WCHAR *titles[4] = { L"模块", L"文件路径", L"基址", L"大小" };
         const int widths[4] = { 150, 300, 110, 80 };
 
-        ctx = (DETAIL_CTX *)malloc(sizeof(DETAIL_CTX));
+        ctx = (DETAIL_CTX *)calloc(1, sizeof(DETAIL_CTX));
         if (!ctx) return -1;
+        if (!pe) { free(ctx); return -1; }
         ctx->entry = *pe;
-        ctx->hFont = CreateUIFont(GetDpiOf(hwnd));
+
+        /* 先挂到窗口上：即便下面某步失败导致创建中止，WM_DESTROY 也能释放 ctx 与字体 */
         SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
+        ctx->hFont = CreateUIFont(GetDpiOf(hwnd));
 
         _snwprintf(buf, 512, L"%s  (PID %u)", ctx->entry.procName, ctx->entry.pid);
         h = CreateWindowExW(0, L"Static", buf, WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_NAME, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Static", L"映像路径：", WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_PATH, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", ctx->entry.procPath,
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ED_PATH, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Static", L"命令行：", WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_CMD, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         buf[0] = 0;
         if (!ProcGetCommandLine(ctx->entry.pid, buf, 512)) {
@@ -545,49 +560,51 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
                             ES_READONLY | ES_MULTILINE | ES_AUTOVSCROLL,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ED_CMD, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Static", L"已加载模块（关联文件）：",
                             WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_MOD, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
                             LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_LIST_MOD, g_hInst, NULL);
-        SetWindowTheme(h, L"Explorer", NULL);
-        ListView_SetExtendedListViewStyle(h, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        if (h) {
+            SetWindowTheme(h, L"Explorer", NULL);
+            ListView_SetExtendedListViewStyle(h, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            SetCtlFont(h, ctx->hFont);
 
-        ZeroMemory(&col, sizeof(col));
-        col.mask = LVCF_TEXT | LVCF_WIDTH;
-        for (i = 0; i < 4; ++i) {
-            col.pszText = (LPWSTR)titles[i];
-            col.cx = S(hwnd, widths[i]);
-            ListView_InsertColumn(h, i, &col);
+            ZeroMemory(&col, sizeof(col));
+            col.mask = LVCF_TEXT | LVCF_WIDTH;
+            for (i = 0; i < 4; ++i) {
+                col.pszText = (LPWSTR)titles[i];
+                col.cx = S(hwnd, widths[i]);
+                ListView_InsertColumn(h, i, &col);
+            }
+            FillModules(h, ctx->entry.pid);
         }
-        FillModules(h, ctx->entry.pid);
 
         h = CreateWindowExW(0, L"Button", L"打开所在目录",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_LOC, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Button", L"结束进程",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_KILL, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Button", L"重新加载",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_RELOAD, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         h = CreateWindowExW(0, L"Button", L"关闭",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_CLOSE, g_hInst, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)ctx->hFont, TRUE);
+        SetCtlFont(h, ctx->hFont);
 
         SendMessage(hwnd, WM_SIZE, 0, 0);
         return 0;
@@ -766,9 +783,11 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                       g_hInst, NULL);
         if (ProcIsElevated()) EnableWindow(g_hBtnAdmin, FALSE);
 
+        /* LVS_OWNERDATA：虚拟列表，行文本按需提供，刷新时不必逐行重建 */
         g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
-                                  LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                  LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                                  LVS_OWNERDATA,
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LIST,
                                   g_hInst, NULL);
         SetWindowTheme(g_hList, L"Explorer", NULL);
@@ -940,6 +959,22 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         NMHDR *hdr = (NMHDR *)lp;
         if (hdr->idFrom == ID_LIST) {
+            if (hdr->code == LVN_GETDISPINFO) {
+                NMLVDISPINFOW *di = (NMLVDISPINFOW *)lp;
+                int item = di->item.iItem;
+
+                if ((di->item.mask & LVIF_TEXT) && di->item.pszText) {
+                    if (item >= 0 && (size_t)item < g_viewCount) {
+                        wcsncpy(di->item.pszText,
+                                CellText(&g_view[item], di->item.iSubItem),
+                                di->item.cchTextMax - 1);
+                        di->item.pszText[di->item.cchTextMax - 1] = 0;
+                    } else {
+                        di->item.pszText[0] = 0;
+                    }
+                }
+                return 0;
+            }
             if (hdr->code == LVN_COLUMNCLICK) {
                 int col = ((NMLISTVIEW *)lp)->iSubItem;
                 if (col == g_sortCol) {

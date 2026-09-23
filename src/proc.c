@@ -327,15 +327,23 @@ BOOL ProcTerminateTree(DWORD pid)
 
 BOOL ProcOpenFileLocation(HWND hwnd, const WCHAR *path)
 {
-    WCHAR arg[MAX_PATH + 16];
+    WCHAR *arg;
+    size_t len;
     HINSTANCE r;
 
     if (!path || !*path) return FALSE;
 
-    _snwprintf(arg, MAX_PATH + 16, L"/select,\"%s\"", path);
-    arg[MAX_PATH + 15] = 0;
+    /* 按实际长度分配，避免长路径（\\?\ 前缀，可超过 MAX_PATH）被截断成无效路径 */
+    len = wcslen(path) + 16;
+    arg = (WCHAR *)malloc(len * sizeof(WCHAR));
+    if (!arg) return FALSE;
+
+    wcscpy(arg, L"/select,\"");
+    wcscat(arg, path);
+    wcscat(arg, L"\"");
 
     r = ShellExecuteW(hwnd, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    free(arg);
     return (INT_PTR)r > 32;
 }
 

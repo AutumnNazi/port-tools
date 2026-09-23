@@ -73,6 +73,23 @@ static void FmtAddr(int family, void *addr, DWORD scope, WCHAR *buf, size_t cch)
     buf[cch - 1] = 0;
 }
 
+/* 数值列的文本在枚举时一次性格式化好，虚拟列表按需取文本时无需再转换 */
+static void FillDerived(PORT_ENTRY *e)
+{
+    _snwprintf(e->portText, 16, L"%u", e->localPort);
+    e->portText[15] = 0;
+
+    if (e->remotePort || e->remoteAddr[0]) {
+        _snwprintf(e->rportText, 16, L"%u", e->remotePort);
+    } else {
+        e->rportText[0] = 0;
+    }
+    e->rportText[15] = 0;
+
+    _snwprintf(e->pidText, 16, L"%u", e->pid);
+    e->pidText[15] = 0;
+}
+
 /* ------------------------------------------------------------ 进程缓存 */
 
 static void CacheReset(void)
@@ -193,6 +210,8 @@ static void AddTcp4(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount);
 
+        FillDerived(&e);
+
         if (!VecPush(v, &e)) break;
     }
     free(table);
@@ -227,6 +246,8 @@ static void AddTcp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
         wcsncpy(e.state, PortsStateText(row->dwState), 23);
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount);
+
+        FillDerived(&e);
 
         if (!VecPush(v, &e)) break;
     }
@@ -265,6 +286,8 @@ static void AddUdp4(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount);
 
+        FillDerived(&e);
+
         if (!VecPush(v, &e)) break;
     }
     free(table);
@@ -299,6 +322,8 @@ static void AddUdp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
 
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount);
+
+        FillDerived(&e);
 
         if (!VecPush(v, &e)) break;
     }
