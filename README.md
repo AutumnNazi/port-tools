@@ -8,7 +8,14 @@
 
 ## 下载
 
-在 [Releases](../../releases) 页面下载 `PortView-x64.exe`（老机器选 `PortView-x86.exe`），双击运行即可。
+在 [Releases](../../releases) 页面下载，按系统选文件：
+
+| 文件 | 适用 |
+| --- | --- |
+| `PortView-Windows-x64.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
+| `PortView-Windows-x86.exe` | 32 位 Windows（老机器） |
+
+单文件、免安装，双击运行即可；要查看或结束系统级进程请右键「以管理员身份运行」。
 
 ## 功能
 

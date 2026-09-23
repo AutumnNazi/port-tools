@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, out: PortView-x64.exe }
-          - { arch: x86, out: PortView-x86.exe }
+          - { arch: x64, out: PortView-Windows-x64.exe }
+          - { arch: x86, out: PortView-Windows-x86.exe }
 
     steps:
       - name: Checkout
@@ -56,3 +56,18 @@ jobs:
         with:
           files: dist/${{ matrix.out }}
           generate_release_notes: true
+          body: |
+            ## 该下载哪个？
+
+            | 文件 | 适用 |
+            | --- | --- |
+            | `PortView-Windows-x64.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
+            | `PortView-Windows-x86.exe` | 32 位 Windows（老机器） |
+
+            单文件、免安装，下载后双击即可运行；要查看或结束系统级进程，请右键「以管理员身份运行」。
+
+            ## 功能
+
+            - 查看 TCP/UDP（IPv4+IPv6）全部端口与连接被哪个进程占用
+            - 双击查看详情：映像路径、命令行、该进程加载的全部模块文件
+            - 打开关联文件所在位置、结束进程 / 结束进程树、按端口或进程名过滤、自动刷新
