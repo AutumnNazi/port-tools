@@ -46,6 +46,9 @@
 #define D_ST_CMD       3012
 #define D_ST_MOD       3013
 
+#define IDI_APPICON    101
+#define REFRESH_MS     3000
+
 #define WM_APP_REFRESH (WM_APP + 1)
 #define WM_APP_KILLED  (WM_APP + 2)
 
@@ -415,9 +418,9 @@ static void ShowContextMenu(HWND hwnd, int item, int x, int y)
     }
 
     e = SelectedEntry();
+    /* x/y 已是屏幕坐标（GetCursorPos / WM_CONTEXTMENU 传入），不要再转换一次 */
     pt.x = x;
     pt.y = y;
-    ClientToScreen(hwnd, &pt);
 
     menu = CreatePopupMenu();
     if (!menu) return;
@@ -788,6 +791,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_hFont);
 
+        /* 默认开启自动刷新，保持端口/进程实时可见 */
+        SendMessage(g_hChkAuto, BM_SETCHECK, BST_CHECKED, 0);
+        SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
+
         LayoutMain(hwnd);
         ReloadAndApply();
         return 0;
@@ -823,7 +830,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_CHK_AUTO:
             if (HIWORD(wp) == BN_CLICKED) {
                 if (SendMessage(g_hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                    SetTimer(hwnd, ID_TIMER, 3000, NULL);
+                    SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
                 } else {
                     KillTimer(hwnd, ID_TIMER);
                 }
@@ -999,7 +1006,10 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     wc.lpfnWndProc = MainProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIcon = (HICON)LoadImage(g_hInst, MAKEINTRESOURCE(IDI_APPICON), IMAGE_ICON,
+                                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)LoadImage(g_hInst, MAKEINTRESOURCE(IDI_APPICON), IMAGE_ICON,
+                                  GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = MAIN_CLASS;
     if (!RegisterClassExW(&wc)) return 1;
@@ -1010,7 +1020,10 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     wcd.lpfnWndProc = DetailProc;
     wcd.hInstance = hInst;
     wcd.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wcd.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wcd.hIcon = (HICON)LoadImage(g_hInst, MAKEINTRESOURCE(IDI_APPICON), IMAGE_ICON,
+                                 GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    wcd.hIconSm = (HICON)LoadImage(g_hInst, MAKEINTRESOURCE(IDI_APPICON), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wcd.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcd.lpszClassName = DETAIL_CLASS;
     if (!RegisterClassExW(&wcd)) return 1;
