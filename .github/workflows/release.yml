@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, out: PortView-Windows-x64.exe }
-          - { arch: x86, out: PortView-Windows-x86.exe }
+          - { arch: x64, tag: x64 }
+          - { arch: x86, tag: x86 }
 
     steps:
       - name: Checkout
@@ -38,23 +38,38 @@ jobs:
           rc /nologo /I src /fobuild\app.res src\app.rc
           link /nologo /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS /OUT:build\PortView.exe build\main.obj build\ports.obj build\proc.obj build\ui.obj build\app.res user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib iphlpapi.lib ws2_32.lib psapi.lib uxtheme.lib
 
-      - name: Rename output
+      - name: Package
         shell: bash
         run: |
+          set -eu
           mkdir -p dist
-          cp build/PortView.exe "dist/${{ matrix.out }}"
+          SUFFIX="-dev"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then SUFFIX=""; fi
+          cp build/PortView.exe "dist/PortView-Windows-${{ matrix.tag }}${SUFFIX}.exe"
+          ls -l dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.out }}
-          path: dist/${{ matrix.out }}
+          name: portview-${{ matrix.tag }}
+          path: dist/*.exe
+
+  release-stable:
+    name: Release (stable tag)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.out }}
+          files: dist/*.exe
           generate_release_notes: true
           body: |
             ## 该下载哪个？
@@ -68,6 +83,42 @@ jobs:
 
             ## 功能
 
-            - 查看 TCP/UDP（IPv4+IPv6）全部端口与连接被哪个进程占用
+            - 查看 TCP/UDP（IPv4+IPv6）全部端口与连接被哪个进程占用，含监听端口
             - 双击查看详情：映像路径、命令行、该进程加载的全部模块文件
             - 打开关联文件所在位置、结束进程 / 结束进程树、按端口或进程名过滤、自动刷新
+
+  release-dev:
+    name: Release (rolling dev)
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish rolling dev pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: dev · ${{ github.event.head_commit.id }}
+          prerelease: true
+          overwrite_files: true
+          files: dist/*.exe
+          generate_release_notes: false
+          body: |
+            **开发版 · 每次推送 `main` 自动重新构建并覆盖同名产物**
+
+            | 文件 | 适用 |
+            | --- | --- |
+            | `PortView-Windows-x64-dev.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
+            | `PortView-Windows-x86-dev.exe` | 32 位 Windows（老机器） |
+
+            - 提交：`${{ github.event.head_commit.id }}`
+            - 触发：`${{ github.event.head_commit.message }}`
+            - 构建号：#${{ github.run_number }}
+            - 单文件免安装，双击运行；查看/结束系统级进程请右键「以管理员身份运行」
+
+            > 这是滚动更新的预览版，不是正式版本（正式版走 `v*` 标签发布）。

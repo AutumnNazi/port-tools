@@ -8,14 +8,22 @@
 
 ## 下载
 
-在 [Releases](../../releases) 页面下载，按系统选文件：
+项目处于开发阶段，目前提供一个**滚动更新的 dev 预发布**：每次推送到 `main` 分支会自动重新构建，并覆盖 Release 里同名的最新产物。
+
+👉 下载入口：[Releases → dev](../../releases/tag/dev)
 
 | 文件 | 适用 |
 | --- | --- |
-| `PortView-Windows-x64.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
-| `PortView-Windows-x86.exe` | 32 位 Windows（老机器） |
+| `PortView-Windows-x64-dev.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
+| `PortView-Windows-x86-dev.exe` | 32 位 Windows（老机器） |
 
 单文件、免安装，双击运行即可；要查看或结束系统级进程请右键「以管理员身份运行」。
+
+需要正式版本时，打 `v*` 标签推送即可触发正式 Release（文件名不带 `-dev`）：
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
 
 ## 功能
 
