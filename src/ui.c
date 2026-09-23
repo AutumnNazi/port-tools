@@ -81,6 +81,9 @@ static size_t g_allCount = 0;
 static PORT_ENTRY *g_view = NULL;
 static size_t g_viewCount = 0;
 
+/* 上一次 PortsEnumerate 是否一张端口表都没读出来 */
+static int g_enumFailed = 0;
+
 static int g_sortCol = COL_LPORT;
 static int g_sortAsc = 1;
 
@@ -278,9 +281,16 @@ static void UpdateStatus(void)
     }
 
     GetLocalTime(&st);
-    _snwprintf(text, 320, L"共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %02d:%02d:%02d",
-               (unsigned)g_allCount, (unsigned)listen, (unsigned)g_viewCount,
-               st.wHour, st.wMinute, st.wSecond);
+
+    if (g_enumFailed) {
+        _snwprintf(text, 320,
+                   L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
+                   st.wHour, st.wMinute, st.wSecond);
+    } else {
+        _snwprintf(text, 320, L"共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %02d:%02d:%02d",
+                   (unsigned)g_allCount, (unsigned)listen, (unsigned)g_viewCount,
+                   st.wHour, st.wMinute, st.wSecond);
+    }
     text[319] = 0;
 
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)text);
@@ -356,11 +366,16 @@ static void ReloadAndApply(void)
     PORT_ENTRY *list = NULL;
     size_t count = 0;
 
-    PortsEnumerate(&list, &count);
-
-    free(g_all);
-    g_all = list;
-    g_allCount = count;
+    if (PortsEnumerate(&list, &count)) {
+        free(g_all);
+        g_all = list;
+        g_allCount = count;
+        g_enumFailed = 0;
+    } else {
+        /* 读取失败时保留上一次的数据并标注出来，不能把界面清成空列表还显示成功 */
+        PortsFree(list);
+        g_enumFailed = 1;
+    }
 
     ApplyView();
 }
@@ -374,14 +389,28 @@ static const PORT_ENTRY *SelectedEntry(void)
 
 /* ------------------------------------------------------------ 操作 */
 
-static void DoKill(HWND hwnd, DWORD pid, const WCHAR *name, BOOL tree)
+static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
 {
     WCHAR msg[512], title[128];
-    int r;
-    BOOL ok;
+    PORT_ENTRY target;
+    PROC_KILL_RESULT r;
 
-    if (pid == 0 || pid == 4) {
+    if (!e) return;
+
+    /* 拷到本地：下面的确认框会阻塞消息循环，期间定时刷新可能已经释放掉 g_view */
+    target = *e;
+
+    if (target.pid == 0 || target.pid == 4) {
         MessageBoxW(hwnd, L"该系统进程无法结束。", L"无法结束", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    if (!target.procCreateValid) {
+        MessageBoxW(hwnd,
+                    L"无法确认该进程的身份：它可能已经退出，也可能权限不足读不到它的启动时间。\n"
+                    L"为避免误杀已被系统复用了同一 PID 的其它进程，本次操作已取消。",
+                    L"未能结束", MB_OK | MB_ICONWARNING);
+        PostMessage(g_hwndMain, WM_APP_REFRESH, 0, 0);
         return;
     }
 
@@ -391,18 +420,49 @@ static void DoKill(HWND hwnd, DWORD pid, const WCHAR *name, BOOL tree)
     _snwprintf(msg, 512,
                tree ? L"确定结束进程 %s（PID %u）及其所有子进程吗？\n未保存的数据将丢失。"
                     : L"确定结束进程 %s（PID %u）吗？\n未保存的数据将丢失。",
-               name, pid);
+               target.procName, target.pid);
 
-    r = MessageBoxW(hwnd, msg, title, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (r != IDYES) return;
+    if (MessageBoxW(hwnd, msg, title, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
 
-    ok = tree ? ProcTerminateTree(pid) : ProcTerminate(pid);
+    /* 带上选择时的进程创建时间：列表可能落后数秒，期间同一 PID 可能已经换成别的进程 */
+    r = tree ? ProcTerminateTree(target.pid, &target.procCreate)
+             : ProcTerminate(target.pid, &target.procCreate);
 
-    if (!ok) {
+    switch (r) {
+    case PROC_KILL_OK:
+        break;
+
+    case PROC_KILL_REUSED:
+        MessageBoxW(hwnd,
+                    L"该 PID 已不是你选择的那个进程（原进程期间已退出，PID 被系统重新分配）。\n"
+                    L"为避免误杀无关进程，本次没有执行结束操作。\n请确认列表上的进程后再试。",
+                    L"已中止", MB_OK | MB_ICONWARNING);
+        break;
+
+    case PROC_KILL_PARTIAL:
+        MessageBoxW(hwnd,
+                    L"进程树已处理，但有部分成员没有结束：它们可能已经退出、PID 已被复用，\n"
+                    L"或权限不足——读不到创建时间的进程无法确认它是否属于这棵树，已跳过。",
+                    L"部分完成", MB_OK | MB_ICONWARNING);
+        break;
+
+    case PROC_KILL_SELF:
+        MessageBoxW(hwnd,
+                    L"要结束的范围里包含本工具自己（你选中的就是它，或者它在那棵进程树里，\n"
+                    L"例如本工具是从你要结束的那个命令行启动的）。\n"
+                    L"为避免操作进行到一半工具自己消失，本次没有执行。",
+                    L"已中止", MB_OK | MB_ICONWARNING);
+        break;
+
+    case PROC_KILL_FAILED:
+    default:
+    {
         DWORD err = GetLastError();
         _snwprintf(msg, 512, L"结束失败（错误 %u）。\n如果是系统或其他用户的进程，请以管理员身份运行本工具。",
                    err);
         MessageBoxW(hwnd, msg, L"失败", MB_OK | MB_ICONERROR);
+        break;
+    }
     }
 
     PostMessage(g_hwndMain, WM_APP_REFRESH, 0, 0);
@@ -657,9 +717,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
 
         case D_BTN_KILL:
-            if (ctx) {
-                DoKill(hwnd, ctx->entry.pid, ctx->entry.procName, FALSE);
-            }
+            if (ctx) DoKill(hwnd, &ctx->entry, FALSE);
             return 0;
 
         case D_BTN_RELOAD:
@@ -869,11 +927,16 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
 
         case ID_EDIT_FILTER:
-            if (HIWORD(wp) == EN_CHANGE) {
-                ApplyView();
-            } else if (HIWORD(wp) == 1) { /* Ctrl+F */
+            /*
+             * 用 lParam 区分消息来源：控件通知的 lParam 是控件句柄（非 0），
+             * 加速键和菜单项发来的 lParam 是 0。拿 HIWORD(wp) == 1 当「这是加速键」
+             * 是靠一个约定俗成的通知码值在猜，控件换个通知码就会串。
+             */
+            if (lp == 0) {                     /* Ctrl+F：聚焦过滤框并选中已有内容 */
                 SetFocus(g_hEdit);
                 SendMessage(g_hEdit, EM_SETSEL, 0, -1);
+            } else if (HIWORD(wp) == EN_CHANGE) {
+                ApplyView();
             }
             return 0;
 
@@ -899,14 +962,14 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_KILL:
         {
             const PORT_ENTRY *e = SelectedEntry();
-            if (e) DoKill(hwnd, e->pid, e->procName, FALSE);
+            if (e) DoKill(hwnd, e, FALSE);
             return 0;
         }
 
         case IDM_KILL_TREE:
         {
             const PORT_ENTRY *e = SelectedEntry();
-            if (e) DoKill(hwnd, e->pid, e->procName, TRUE);
+            if (e) DoKill(hwnd, e, TRUE);
             return 0;
         }
 
