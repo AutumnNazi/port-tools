@@ -9,10 +9,10 @@ if "%ARCH%"=="" set ARCH=x64
 
 if not exist build mkdir build
 
-cl /nologo /c /O2 /MT /GL /W3 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I src /Fo build\ src\main.c src\ports.c src\proc.c src\ui.c
+cl /nologo /c /O2 /MT /GL /W3 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I src /Fobuild\ src\main.c src\ports.c src\proc.c src\ui.c
 if errorlevel 1 goto :fail
 
-rc /nologo /I src /fo build\app.res src\app.rc
+rc /nologo /I src /fobuild\app.res src\app.rc
 if errorlevel 1 goto :fail
 
 link /nologo /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS ^

@@ -219,9 +219,9 @@ static void AddTcp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
         ZeroMemory(&e, sizeof(e));
         wcsncpy(e.proto, L"TCP6", 7);
 
-        FmtAddr(AF_INET6, &row->LocalAddr, row->dwLocalScopeId, e.localAddr, 64);
+        FmtAddr(AF_INET6, row->ucLocalAddr, row->dwLocalScopeId, e.localAddr, 64);
         e.localPort = ntohs((u_short)row->dwLocalPort);
-        FmtAddr(AF_INET6, &row->RemoteAddr, row->dwRemoteScopeId, e.remoteAddr, 64);
+        FmtAddr(AF_INET6, row->ucRemoteAddr, row->dwRemoteScopeId, e.remoteAddr, 64);
         e.remotePort = ntohs((u_short)row->dwRemotePort);
 
         wcsncpy(e.state, PortsStateText(row->dwState), 23);

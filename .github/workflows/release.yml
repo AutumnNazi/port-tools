@@ -34,8 +34,8 @@ jobs:
         shell: cmd
         run: |
           mkdir build
-          cl /nologo /c /O2 /MT /GL /W3 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I src /Fo build\ src\main.c src\ports.c src\proc.c src\ui.c
-          rc /nologo /I src /fo build\app.res src\app.rc
+          cl /nologo /c /O2 /MT /GL /W3 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I src /Fobuild\ src\main.c src\ports.c src\proc.c src\ui.c
+          rc /nologo /I src /fobuild\app.res src\app.rc
           link /nologo /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS /OUT:build\PortView.exe build\main.obj build\ports.obj build\proc.obj build\ui.obj build\app.res user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib iphlpapi.lib ws2_32.lib psapi.lib uxtheme.lib
 
       - name: Rename output
