@@ -164,13 +164,13 @@ static void AddTcp4(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
     PMIB_TCPTABLE_OWNER_PID table = NULL;
     DWORD size = 0, r, i;
 
-    r = GetExtendedTcpTable(NULL, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+    r = GetExtendedTcpTable(NULL, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
     if (r != ERROR_INSUFFICIENT_BUFFER || size == 0) return;
 
     table = (PMIB_TCPTABLE_OWNER_PID)malloc(size);
     if (!table) return;
 
-    r = GetExtendedTcpTable(table, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+    r = GetExtendedTcpTable(table, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
     if (r != NO_ERROR) { free(table); return; }
 
     for (i = 0; i < table->dwNumEntries; ++i) {
@@ -203,13 +203,13 @@ static void AddTcp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount)
     PMIB_TCP6TABLE_OWNER_PID table = NULL;
     DWORD size = 0, r, i;
 
-    r = GetExtendedTcpTable(NULL, &size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+    r = GetExtendedTcpTable(NULL, &size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
     if (r != ERROR_INSUFFICIENT_BUFFER || size == 0) return;
 
     table = (PMIB_TCP6TABLE_OWNER_PID)malloc(size);
     if (!table) return;
 
-    r = GetExtendedTcpTable(table, &size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+    r = GetExtendedTcpTable(table, &size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
     if (r != NO_ERROR) { free(table); return; }
 
     for (i = 0; i < table->dwNumEntries; ++i) {
