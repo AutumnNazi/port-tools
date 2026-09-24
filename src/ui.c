@@ -1116,6 +1116,27 @@ static void LayoutColumns(HWND hwnd)
     ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
 }
 
+/*
+ * 工具栏视觉统一。
+ *
+ * 问题：CheckBox 在 Common Controls 6.0 下走 visual styles 主题渲染，
+ * 固定用 COLOR_BTNFACE 的浅灰画一块矩形底，而 Edit 与窗口本身是白色。
+ * 两种底色并排时，每个勾选框后面都像贴了块色板，控件与控件不在同一视觉平面上。
+ * WM_CTLCOLORBTN 对它无效——主题控件不问父窗口要背景刷。
+ *
+ * 解法：SetWindowTheme(hwnd, L"", L"") 关闭该控件的主题，改回经典绘制。
+ * 经典绘制下 CheckBox 会向父窗口发 WM_CTLCOLORBTN，于是能被统一成窗口背景色。
+ * 代价是勾选框不再有 Win10 的扁平主题外观，但换来整条工具栏颜色一致。
+ */
+static void MakeToolbarFlat(void)
+{
+    SetWindowTheme(g_hChkAuto, L"", L"");
+    SetWindowTheme(g_hChkListen, L"", L"");
+    /* ComboBox 保留 Explorer 主题：它需要主题才能画出完整边框与箭头，
+     * 关掉主题反而会让下拉框看不出可点。 */
+    SetWindowTheme(g_hCbProto, L"Explorer", NULL);
+}
+
 static void LayoutMain(HWND hwnd)
 {
     RECT rc, rs;
@@ -1283,6 +1304,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv4");
         SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv6");
         SendMessageW(g_hCbProto, CB_SETCURSEL, 0, 0);
+        SetWindowTheme(g_hCbProto, L"Explorer", NULL);
 
         g_hChkListen = CreateWindowExW(0, L"Button", L"仅监听端口",
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -1331,6 +1353,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessage(g_hChkAuto, BM_SETCHECK, BST_CHECKED, 0);
         SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
 
+        MakeToolbarFlat();
+
         LayoutMain(hwnd);
         ReloadAndApply();
         return 0;
@@ -1339,6 +1363,17 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
         LayoutMain(hwnd);
         return 0;
+
+    /*
+     * 静态控件与列表的标签统一用窗口背景。
+     * 注意：CheckBox 不能靠 WM_CTLCOLORBTN 去掉灰底——清单里启用了 Common Controls
+     * 6.0，勾选框走 visual styles 主题渲染，根本不向父窗口索取背景刷，
+     * 它自己就按 COLOR_BTNFACE 画。真正的解法见 MakeToolbarFlat()。
+     */
+    case WM_CTLCOLORSTATIC:
+        SetTextColor((HDC)wp, RGB(0, 0, 0));
+        SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
 
     case WM_DPICHANGED:
     {
