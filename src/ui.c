@@ -108,6 +108,7 @@ static void UpdateInfoBar(void);
 /* 顶栏的两个结构化筛选，与文本框是「与」的关系：文本框管模糊匹配，这两个管精确范围 */
 static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
 static int g_listenOnly = 0;    /* 1=只看监听端口 */
+static BOOL g_autoOn = TRUE;    /* 自动刷新勾选框状态 */
 static BOOL g_hadInitialSelect = FALSE;   /* 首次载入是否已做过默认选中 */
 
 /* ------------------------------------------------------------ 基础工具 */
@@ -1119,28 +1120,209 @@ static void LayoutColumns(HWND hwnd)
 /*
  * 工具栏视觉统一。
  *
- * 问题：CheckBox 在 Common Controls 6.0 下走 visual styles 主题渲染，
- * 固定用 COLOR_BTNFACE 的浅灰画一块矩形底，而 Edit 与窗口本身是白色。
- * 两种底色并排时，每个勾选框后面都像贴了块色板，控件与控件不在同一视觉平面上。
- * WM_CTLCOLORBTN 对它无效——主题控件不问父窗口要背景刷。
- *
- * 解法：SetWindowTheme(hwnd, L"", L"") 关闭该控件的主题，改回经典绘制。
- * 经典绘制下 CheckBox 会向父窗口发 WM_CTLCOLORBTN，于是能被统一成窗口背景色。
- * 代价是勾选框不再有 Win10 的扁平主题外观，但换来整条工具栏颜色一致。
+ * 勾选框用 BS_OWNERDRAW 自绘，按钮的边框、底色、按下与勾选高亮都由
+ * DrawCheckButton 画，和「刷新 (F5)」走同一套配色；ComboBox 保留主题，
+ * 以画完整边框和箭头。控件的顶边和高度由 LayoutMain 统一计算。
  */
 static void MakeToolbarFlat(void)
 {
     SetWindowTheme(g_hChkAuto, L"", L"");
     SetWindowTheme(g_hChkListen, L"", L"");
-    /* ComboBox 保留 Explorer 主题：它需要主题才能画出完整边框与箭头，
-     * 关掉主题反而会让下拉框看不出可点。 */
     SetWindowTheme(g_hCbProto, L"Explorer", NULL);
+}
+
+/*
+ * 勾选框自绘。系统自带的 BS_AUTOCHECKBOX 不管控件多高，方框和文字永远只占
+ * 中间那一小块，上下留白后看着就只有旁边按钮一半高；加 BS_PUSHBUTTON 也救不
+ * 回来，因为勾选框的绘制分支优先级更高，根本不画按钮边框。
+ * 干脆自己按控件高度铺满：底色、边框、勾选标记、按下反馈都自己算，
+ * 这样工具栏一排控件的外框高度才是真正一致的。
+ */
+static void DrawCheckButton(HWND hwnd, DRAWITEMSTRUCT *di)
+{
+    HWND ctl = di->hwndItem;
+    RECT rc = di->rcItem;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    BOOL on = (GetDlgCtrlID(ctl) == ID_CHK_AUTO) ? g_autoOn : (g_listenOnly != 0);
+    BOOL down = (di->itemState & ODS_SELECTED) != 0;
+    BOOL gray = (di->itemState & ODS_DISABLED) != 0;
+    BOOL focus = (di->itemState & ODS_FOCUS) != 0;
+    HFONT font = (HFONT)SendMessage(ctl, WM_GETFONT, 0, 0);
+    COLORREF accent = GetSysColor(gray ? COLOR_GRAYTEXT : COLOR_HIGHLIGHT);
+    COLORREF face, line, text;
+    HDC dc;
+    HBITMAP bmp;
+    HGDIOBJ oldBmp, oldFont;
+    int box, pad, tx;
+    int penW;
+    WCHAR label[64];
+    RECT textRc;
+
+    if (w <= 0 || h <= 0) return;
+
+    if (gray) {
+        face = RGB(240, 240, 240);
+        line = RGB(173, 173, 173);
+        text = RGB(128, 128, 128);
+    } else if (on) {
+        face = down ? accent : RGB(0, 120, 215);
+        line = down ? accent : RGB(0, 95, 184);
+        text = RGB(255, 255, 255);
+    } else {
+        face = down ? RGB(229, 229, 229) : GetSysColor(COLOR_BTNFACE);
+        line = GetSysColor(COLOR_3DLIGHT);
+        text = GetSysColor(COLOR_BTNTEXT);
+    }
+
+    dc = CreateCompatibleDC(di->hDC);
+    bmp = CreateCompatibleBitmap(di->hDC, w, h);
+    if (!dc || !bmp) {
+        if (dc) DeleteDC(dc);
+        if (bmp) DeleteObject(bmp);
+        return;
+    }
+    oldBmp = SelectObject(dc, bmp);
+    oldFont = font ? SelectObject(dc, font) : NULL;
+
+    SetBkMode(dc, TRANSPARENT);
+
+    /* 外框：1 像素边线，比按钮的立体边更安静，勾选时再整体换成主色 */
+    {
+        HBRUSH br = CreateSolidBrush(face);
+        FillRect(dc, &rc, br);
+        DeleteObject(br);
+    }
+    {
+        RECT edge = rc;
+        HBRUSH br = CreateSolidBrush(line);
+        FrameRect(dc, &edge, br);
+        DeleteObject(br);
+    }
+
+    box = MulDiv(h, 3, 5);
+    if (box < MulDiv(h, 2, 5)) box = MulDiv(h, 2, 5);
+    if (box > MulDiv(h, 3, 4)) box = MulDiv(h, 3, 4);
+    pad = MulDiv(w, 1, 16) + 1;
+
+    {
+        int bx = pad;
+        int by = (h - box) / 2;
+        RECT b = { bx, by, bx + box, by + box };
+
+        if (on || gray) {
+            HBRUSH br = CreateSolidBrush(accent);
+            FillRect(dc, &b, br);
+            DeleteObject(br);
+        } else {
+            HBRUSH br = CreateSolidBrush(RGB(255, 255, 255));
+            FillRect(dc, &b, br);
+            DeleteObject(br);
+        }
+        {
+            RECT e = b;
+            HBRUSH br = CreateSolidBrush(on || gray ? accent : line);
+            FrameRect(dc, &e, br);
+            DeleteObject(br);
+        }
+
+        if (on) {
+            /* 勾：两段折线，白色圆头画笔 */
+            HPEN pen = CreatePen(PS_SOLID | PS_ENDCAP_ROUND,
+                                 penW = box / 7 < 2 ? 2 : box / 7,
+                                 GetSysColor(COLOR_WINDOW));
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            int m = box / 6;
+            int x1 = bx + box * 22 / 100;
+            int y1 = by + box * 52 / 100;
+            int x2 = bx + box * 42 / 100;
+            int y2 = by + box * 74 / 100;
+            int x3 = bx + box * 78 / 100;
+            int y3 = by + box * 28 / 100;
+            MoveToEx(dc, x1 + m, y1, NULL);
+            LineTo(dc, x2, y2);
+            LineTo(dc, x3 + m, y3);
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+        }
+    }
+
+    tx = pad * 2 + box;
+    textRc.left = tx;
+    textRc.right = w - pad;
+    textRc.top = 0;
+    textRc.bottom = h;
+    SetTextColor(dc, text);
+    GetWindowTextW(ctl, label, 64);
+    DrawTextW(dc, label, -1, &textRc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (focus) {
+        /* 框整个控件而不是只框文字，跟原生按钮的焦点提示对得上 */
+        RECT f = { 2, 2, w - 3, h - 3 };
+        DrawFocusRect(dc, &f);
+    }
+
+    BitBlt(di->hDC, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+
+    if (oldFont) SelectObject(dc, oldFont);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    UNREFERENCED_PARAMETER(hwnd);
+}
+
+/*
+ * 自绘勾选框的勾选状态。
+ *
+ * BS_OWNERDRAW 的按钮类不处理 BM_GETCHECK/BM_SETCHECK，状态完全归绘制方管；
+ * 同样也不会替我们翻转勾选、也不会发 BN_CLICKED。所以状态存在 g_autoOn /
+ * g_listenOnly 里，鼠标点击和空格键在下面这个子类里自己接。
+ *
+ * 副作用按「目标状态」施加（按状态起停定时器、按状态过滤）而不是「翻转」，
+ * 所以万一系统又补发了一次 BN_CLICKED，重复调用也只是重算一遍，不会翻回去。
+ */
+static LRESULT CALLBACK CheckSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR id, DWORD_PTR ref)
+{
+    LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(ref);
+
+    if (msg == WM_LBUTTONUP || (msg == WM_KEYUP && wp == VK_SPACE)) {
+        HWND parent;
+        int ctrlId = GetDlgCtrlID(hwnd);
+
+        /* 按下后在控件外松开不算一次点击，否则拖出边界再松手也会误翻勾 */
+        if (msg == WM_LBUTTONUP) {
+            RECT rc;
+            int x = (int)(short)LOWORD(lp);
+            int y = (int)(short)HIWORD(lp);
+            GetClientRect(hwnd, &rc);
+            if (x < rc.left || x >= rc.right || y < rc.top || y >= rc.bottom)
+                return r;
+        }
+
+        parent = GetParent(hwnd);
+        if (ctrlId == ID_CHK_AUTO) {
+            g_autoOn = !g_autoOn;
+            InvalidateRect(hwnd, NULL, TRUE);
+            if (g_autoOn) SetTimer(parent, ID_TIMER, REFRESH_MS, NULL);
+            else KillTimer(parent, ID_TIMER);
+        } else if (ctrlId == ID_CHK_LISTEN) {
+            g_listenOnly = !g_listenOnly;
+            InvalidateRect(hwnd, NULL, TRUE);
+            ApplyView();
+        }
+    }
+
+    return r;
 }
 
 static void LayoutMain(HWND hwnd)
 {
     RECT rc, rs;
-    int w, h, pad, bh, sbH, x;
+    int w, h, pad, bh, toolbarY, sbH, x;
     int parts[2];
 
     if (!g_hList) return;
@@ -1150,6 +1332,7 @@ static void LayoutMain(HWND hwnd)
     h = rc.bottom;
     pad = S(hwnd, 8);
     bh = S(hwnd, 26);
+    toolbarY = S(hwnd, 6);
 
     /*
      * 状态栏高度必须在「状态栏自己的坐标系」里量，不能用 GetWindowRect：
@@ -1218,18 +1401,18 @@ static void LayoutMain(HWND hwnd)
             BOOL showProto  = (avail >= needProto);
 
             x = pad;
-            MoveWindow(g_hEdit, x, S(hwnd, 6), wEdit, bh, TRUE);
+            MoveWindow(g_hEdit, x, toolbarY, wEdit, bh, TRUE);
             x += wEdit + gap;
 
-            MoveWindow(g_hBtnRefresh, x, S(hwnd, 6), wRefresh, bh, TRUE);
+            MoveWindow(g_hBtnRefresh, x, toolbarY, wRefresh, bh, TRUE);
             x += wRefresh + gap;
 
             if (showAuto) {
-                MoveWindow(g_hChkAuto, x, S(hwnd, 9), wAuto, bh, TRUE);
+                MoveWindow(g_hChkAuto, x, toolbarY, wAuto, bh, TRUE);
                 ShowWindow(g_hChkAuto, SW_SHOW);
                 /* 窗口从窄拉回宽时要恢复定时器，否则收起一次就再也刷不上了；
                  * 是否该刷以复选框的勾选状态为准，不在这里强行开或关。 */
-                if (SendMessage(g_hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                if (g_autoOn)
                     SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
                 else
                     KillTimer(hwnd, ID_TIMER);
@@ -1240,14 +1423,14 @@ static void LayoutMain(HWND hwnd)
             }
 
             if (showProto) {
-                MoveWindow(g_hCbProto, x, S(hwnd, 6), wProto, S(hwnd, 200), TRUE);
+                MoveWindow(g_hCbProto, x, toolbarY, wProto, S(hwnd, 200), TRUE);
                 x += wProto + gap;
             } else {
                 ShowWindow(g_hCbProto, SW_HIDE);
             }
 
             if (showListen) {
-                MoveWindow(g_hChkListen, x, S(hwnd, 9), wListen, bh, TRUE);
+                MoveWindow(g_hChkListen, x, toolbarY, wListen, bh, TRUE);
             } else {
                 ShowWindow(g_hChkListen, SW_HIDE);
             }
@@ -1287,8 +1470,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_BTN_REFRESH,
                                         g_hInst, NULL);
 
+        /*
+         * BS_OWNERDRAW 让勾选框按控件整块高度自绘，外观与「刷新 (F5)」对齐。
+         * 按钮类不再替我们管勾选，状态存 g_autoOn / g_listenOnly，
+         * 点击与空格键由 CheckSubclassProc 接。
+         */
         g_hChkAuto = CreateWindowExW(0, L"Button", L"自动刷新 (3s)",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_AUTO,
                                      g_hInst, NULL);
 
@@ -1307,7 +1495,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowTheme(g_hCbProto, L"Explorer", NULL);
 
         g_hChkListen = CreateWindowExW(0, L"Button", L"仅监听端口",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                        0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_LISTEN,
                                        g_hInst, NULL);
 
@@ -1323,6 +1511,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                           LVS_EX_LABELTIP);
         SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
+        SetWindowSubclass(g_hChkAuto, CheckSubclassProc, 2, 0);
+        SetWindowSubclass(g_hChkListen, CheckSubclassProc, 2, 0);
 
         ZeroMemory(&col, sizeof(col));
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -1350,7 +1540,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_hFont);
 
         /* 默认开启自动刷新，保持端口/进程实时可见 */
-        SendMessage(g_hChkAuto, BM_SETCHECK, BST_CHECKED, 0);
+        g_autoOn = TRUE;
         SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
 
         MakeToolbarFlat();
@@ -1366,14 +1556,19 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     /*
      * 静态控件与列表的标签统一用窗口背景。
-     * 注意：CheckBox 不能靠 WM_CTLCOLORBTN 去掉灰底——清单里启用了 Common Controls
-     * 6.0，勾选框走 visual styles 主题渲染，根本不向父窗口索取背景刷，
-     * 它自己就按 COLOR_BTNFACE 画。真正的解法见 MakeToolbarFlat()。
+     * 勾选框是 BS_OWNERDRAW，WM_PAINT 根本不走这里，所以不需要 WM_CTLCOLORBTN。
      */
     case WM_CTLCOLORSTATIC:
         SetTextColor((HDC)wp, RGB(0, 0, 0));
         SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+
+    case WM_DRAWITEM:
+        if (wp == ID_CHK_AUTO || wp == ID_CHK_LISTEN) {
+            DrawCheckButton(hwnd, (DRAWITEMSTRUCT *)lp);
+            return TRUE;
+        }
+        return FALSE;
 
     case WM_DPICHANGED:
     {
@@ -1399,8 +1594,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
 
         case ID_CHK_AUTO:
+            /* 勾选与定时器的同步由 CheckSubclassProc 完成；这里只兜住
+             * 系统补发的 BN_CLICKED，动作按状态施加，重复执行无副作用。 */
             if (HIWORD(wp) == BN_CLICKED) {
-                if (SendMessage(g_hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                if (g_autoOn) {
                     SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
                 } else {
                     KillTimer(hwnd, ID_TIMER);
@@ -1417,7 +1614,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         case ID_CHK_LISTEN:
             if (HIWORD(wp) == BN_CLICKED) {
-                g_listenOnly = (SendMessage(g_hChkListen, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 ApplyView();
             }
             return 0;
@@ -1474,8 +1670,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SetWindowTextW(g_hEdit, L"");
             SendMessage(g_hCbProto, CB_SETCURSEL, 0, 0);
             g_protoFilter = 0;
-            SendMessage(g_hChkListen, BM_SETCHECK, BST_UNCHECKED, 0);
             g_listenOnly = 0;
+            InvalidateRect(g_hChkListen, NULL, TRUE);
             ApplyView();
             SetFocus(g_hList);
             return 0;
