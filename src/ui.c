@@ -24,6 +24,9 @@
 #define ID_LIST        1005
 #define ID_STATUS      1006
 #define ID_TIMER       1007
+#define ID_CB_PROTO    1008
+#define ID_CHK_LISTEN  1009
+#define ID_INFOBAR     1010    /* 底部选中项详情栏 */
 
 #define IDM_OPEN_LOC   2001
 #define IDM_DETAIL     2002
@@ -33,6 +36,8 @@
 #define IDM_COPY_PID   2006
 #define IDM_COPY_ROW   2007
 #define IDM_FILTER_SEL 2008
+#define IDM_CLEAR      2009    /* Esc: 清空筛选框与两个结构化条件 */
+#define IDM_ELEVATE    2010    /* Ctrl+Shift+E: 提权重启 */
 
 #define D_ED_PATH      3001
 #define D_ED_CMD       3002
@@ -45,6 +50,7 @@
 #define D_ST_PATH      3011
 #define D_ST_CMD       3012
 #define D_ST_MOD       3013
+#define D_ICO          3014    /* 进程图标 */
 
 #define IDI_APPICON    101
 #define REFRESH_MS     3000
@@ -62,9 +68,16 @@ static const WCHAR *COL_TITLES[COL_COUNT] = {
     L"状态", L"PID", L"进程", L"映像路径"
 };
 
+/*
+ * 列宽按信息量分配，不平均分。地址列在通配监听时只剩一个 *，却占着 140px；
+ * 而映像路径是判断「谁占了端口」最该看的一列，反而被前面几列挤出可视区。
+ * 路径列不写死宽度，由 LayoutColumns 把窗口剩下的宽度全给它。
+ */
 static const int COL_WIDTHS[COL_COUNT] = {
-    56, 140, 74, 140, 74, 92, 62, 130, 320
+    56, 104, 76, 104, 76, 88, 64, 150, 240
 };
+
+#define COL_PATH_MIN 180   /* 路径列最小宽度，窗口再窄也不低于此 */
 
 static HINSTANCE g_hInst;
 static HWND g_hwndMain;
@@ -72,7 +85,9 @@ static HWND g_hList;
 static HWND g_hEdit;
 static HWND g_hBtnRefresh;
 static HWND g_hChkAuto;
-static HWND g_hBtnAdmin;
+static HWND g_hCbProto;
+static HWND g_hChkListen;
+static HWND g_hInfoBar;
 static HWND g_hStatus;
 static HFONT g_hFont;
 
@@ -86,6 +101,14 @@ static int g_enumFailed = 0;
 
 static int g_sortCol = COL_LPORT;
 static int g_sortAsc = 1;
+
+/* UpdateInfoBar 定义在 ApplyView 之后（它要用 SelectedEntry），这里先前置声明 */
+static void UpdateInfoBar(void);
+
+/* 顶栏的两个结构化筛选，与文本框是「与」的关系：文本框管模糊匹配，这两个管精确范围 */
+static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
+static int g_listenOnly = 0;    /* 1=只看监听端口 */
+static BOOL g_hadInitialSelect = FALSE;   /* 首次载入是否已做过默认选中 */
 
 /* ------------------------------------------------------------ 基础工具 */
 
@@ -213,14 +236,26 @@ static int SameEntry(const PORT_ENTRY *a, const PORT_ENTRY *b)
            _wcsicmp(a->remoteAddr, b->remoteAddr) == 0;
 }
 
+/*
+ * 通配地址缩写：0.0.0.0 与 :: 表示「本机所有网卡」，占满一整列却几乎没有信息量。
+ * 缩成 * 与 netstat、TCPView 的习惯一致，也让出的宽度能给映像路径。
+ * 只影响显示，MatchFilter 仍用原始地址匹配，按 IP 搜索照常可用。
+ */
+static const WCHAR *ShortAddr(const WCHAR *addr)
+{
+    if (_wcsicmp(addr, L"0.0.0.0") == 0 || _wcsicmp(addr, L"::") == 0)
+        return L"*";
+    return addr;
+}
+
 /* LVS_OWNERDATA 下按需提供单元格文本，文本在 ports.c 枚举时已格式化好 */
 static const WCHAR *CellText(const PORT_ENTRY *e, int col)
 {
     switch (col) {
     case COL_PROTO: return e->proto;
-    case COL_LADDR: return e->localAddr;
+    case COL_LADDR: return ShortAddr(e->localAddr);
     case COL_LPORT: return e->portText;
-    case COL_RADDR: return e->remoteAddr;
+    case COL_RADDR: return ShortAddr(e->remoteAddr);
     case COL_RPORT: return e->rportText;
     case COL_STATE: return e->state;
     case COL_PID:   return e->pidText;
@@ -242,6 +277,24 @@ static COLORREF StateTextColor(const WCHAR *state)
     if (_wcsicmp(state, L"时间等待") == 0 || _wcsicmp(state, L"已关闭") == 0)
         return RGB(130, 130, 130);
     return RGB(200, 110, 0);   /* 关闭等待 / FIN / SYN / 正在关闭 等中间态 */
+}
+
+/*
+ * 协议范围筛选。协议名与地址列的 TCP6/UDP6 前后缀已经区分了 IPv4/IPv6，
+ * 所以这里直接按字符串判断，不再依赖 ports.c 暴露额外标志位。
+ */
+static BOOL MatchProto(const PORT_ENTRY *e, int mode)
+{
+    BOOL isTcp = (_wcsicmp(e->proto, L"TCP") == 0 || _wcsicmp(e->proto, L"TCP6") == 0);
+    BOOL isV6 = (_wcsicmp(e->proto, L"TCP6") == 0 || _wcsicmp(e->proto, L"UDP6") == 0);
+
+    switch (mode) {
+    case 1: return isTcp;
+    case 2: return !isTcp;
+    case 3: return !isV6;
+    case 4: return isV6;
+    default: return TRUE;
+    }
 }
 
 /* 逐字段匹配，避免为每行拼一个临时大字符串 */
@@ -308,8 +361,100 @@ static void UpdateStatus(void)
     text[319] = 0;
 
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)text);
-    SendMessageW(g_hStatus, SB_SETTEXTW, 1,
-                 (LPARAM)(ProcIsElevated() ? L"管理员" : L"标准用户（部分进程受限）"));
+
+    /*
+     * 右端这一格同时承担两件事：显示当前权限，以及作为提权入口。
+     * 未提权时显示成「标准用户（点击提权）」，鼠标移上去有下划线提示可点；
+     * 已提权则只是纯状态，不可点。
+     */
+    if (ProcIsElevated()) {
+        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)L"管理员");
+    } else {
+        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)L"标准用户 · 点击提权");
+    }
+}
+
+/*
+ * 空结果提示。区分两种「空」：本来就没数据（枚举成功但 0 条）与
+ * 过滤后没数据（有数据但被条件筛掉了）——后者需要告诉用户去清条件，
+ * 否则会以为是程序坏了。
+ */
+static const WCHAR *EmptyHintText(void)
+{
+    /* 区分两种「空」：本来就没数据，与有数据但被筛选条件滤光。
+     * 后者必须提示去清条件，否则用户会以为程序坏了。 */
+    if (g_allCount == 0) return L"当前没有检测到端口占用";
+    if (g_listenOnly || g_protoFilter != 0)
+        return L"没有符合当前筛选条件的端口\n试试取消「仅监听端口」或切换协议";
+    if (g_allCount > 0)
+        return L"没有匹配的端口\n试试清空筛选框";
+    return L"当前没有检测到端口占用";
+}
+
+/*
+ * 空结果提示由 PaintEmptyHint 在列表 WM_PAINT 里叠加绘制。
+ * 不能在 ApplyView 里直接画：紧接着的 InvalidateRect 会把字擦掉。
+ * 这里只准备文本与状态，判断留给绘制时。
+ */
+static BOOL ShouldPaintEmptyHint(void)
+{
+    return g_viewCount == 0;
+}
+
+/*
+ * 在列表空白处叠加居中提示。调用前默认绘制已完成，这里只在「一个可见行都没有」
+ * 时画字，避免盖住数据。
+ */
+static void PaintEmptyHint(HDC hdc)
+{
+    RECT rc;
+    const WCHAR *msg;
+    HFONT font;
+    HGDIOBJ oldFont;
+    COLORREF oldColor;
+    int oldBk;
+
+    if (!ShouldPaintEmptyHint()) return;
+
+    GetClientRect(g_hList, &rc);
+    /* 避开列头区域，让提示落在数据区中央 */
+    if (rc.bottom > S(g_hwndMain, 24)) rc.top += S(g_hwndMain, 24);
+
+    msg = EmptyHintText();
+    font = g_hFont ? g_hFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    /* SelectObject 返回 HGDIOBJ、SetTextColor 返回 COLORREF，两者的还原方式不同，不能共用一个变量 */
+    oldFont = SelectObject(hdc, font);
+    oldBk = SetBkMode(hdc, TRANSPARENT);
+    oldColor = SetTextColor(hdc, RGB(130, 130, 130));
+
+    DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX);
+
+    SetTextColor(hdc, oldColor);
+    SetBkMode(hdc, oldBk);
+    SelectObject(hdc, oldFont);
+}
+
+/*
+ * 列表子类：在默认 WM_PAINT 跑完之后，若一个可见行都没有，叠加空结果提示。
+ * 默认绘制必须先做完（DefSubclassProc），否则提示会被列表自己重绘擦掉。
+ */
+static LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref)
+{
+    /* DefSubclassProc 只收 4 个参数；id/ref 由框架自己带着，无需回传 */
+    LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(ref);
+
+    if (msg == WM_PAINT && ShouldPaintEmptyHint()) {
+        HDC hdc = GetDC(hwnd);
+        if (hdc) {
+            PaintEmptyHint(hdc);
+            ReleaseDC(hwnd, hdc);
+        }
+    }
+
+    return r;
 }
 
 /* 列头排序箭头：当前排序列和方向要一眼可见 */
@@ -372,7 +517,18 @@ static void ApplyView(void)
         g_view = (PORT_ENTRY *)malloc(g_allCount * sizeof(PORT_ENTRY));
         if (g_view) {
             for (i = 0; i < g_allCount; ++i) {
-                if (MatchFilter(&g_all[i], filter)) g_view[n++] = g_all[i];
+                const PORT_ENTRY *e = &g_all[i];
+                BOOL listening = (_wcsicmp(e->state, L"监听") == 0);
+
+                /* 三个条件是「与」：文本框模糊匹配 + 协议范围 + 仅监听
+                 * UDP 没有连接状态，本身就是常驻端口，所以不参与「仅监听」判定，
+                 * 否则勾上之后 UDP 会整片消失。 */
+                if (g_listenOnly && !e->state[0]) continue;
+                if (g_listenOnly && !listening) continue;
+                if (!MatchProto(e, g_protoFilter)) continue;
+                if (!MatchFilter(e, filter)) continue;
+
+                g_view[n++] = *e;
             }
             if (n) qsort(g_view, n, sizeof(PORT_ENTRY), CmpEntry);
         }
@@ -398,8 +554,18 @@ static void ApplyView(void)
     } else if (top > 0 && g_viewCount) {
         if ((size_t)top >= g_viewCount) top = (int)g_viewCount - 1;
         ListView_EnsureVisible(g_hList, top, TRUE);
+    } else if (g_viewCount && !haveSel && !g_hadInitialSelect) {
+        /*
+         * 首次载入且没有可恢复的选中项时，默认选中第一行。
+         * 之前首屏一行都没选，底部详情是空的，用户要先点一下才知道选中了什么。
+         */
+        g_hadInitialSelect = TRUE;
+        ListView_SetItemState(g_hList, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
     }
 
+    InvalidateRect(g_hList, NULL, FALSE);
+    UpdateInfoBar();
     UpdateStatus();
     UpdateSortMark();
 }
@@ -430,7 +596,84 @@ static const PORT_ENTRY *SelectedEntry(void)
     return &g_view[i];
 }
 
+/*
+ * 刷新底部详情栏。选中即更新，不用双击就能看到「进程 · PID · 路径」。
+ * 路径过长时中间省略，保留开头的盘符和结尾的 exe 名——这两段才是定位用的。
+ */
+static void UpdateInfoBar(void)
+{
+    const PORT_ENTRY *e = SelectedEntry();
+    WCHAR text[512];
+
+    if (!g_hInfoBar) return;
+
+    if (!e) {
+        SetWindowTextW(g_hInfoBar, L"　选中一行查看占用详情");
+        return;
+    }
+
+    if (e->procPath[0]) {
+        _snwprintf(text, 512, L"　%s　PID %u　%s",
+                   e->procName[0] ? e->procName : L"(未知进程)",
+                   e->pid,
+                   e->procPath);
+    } else {
+        /* 无路径多是权限不足，明确说出来，免得以为程序没取到 */
+        _snwprintf(text, 512,
+                   L"　%s　PID %u　（映像路径不可用，可能需要管理员权限）",
+                   e->procName[0] ? e->procName : L"(未知进程)", e->pid);
+    }
+    text[511] = 0;
+
+    SetWindowTextW(g_hInfoBar, text);
+}
+
 /* ------------------------------------------------------------ 操作 */
+
+/*
+ * 提权确认：状态栏右端点击、或后续快捷键都走这里，统一提示文案与失败处理。
+ * 提权成功后关闭当前实例，避免出现两个窗口同时枚举端口。
+ */
+static BOOL ConfirmElevate(HWND hwnd)
+{
+    if (MessageBoxW(hwnd,
+                    L"以管理员身份重启后可以查看并结束系统级进程。\n是否继续？",
+                    L"提权", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return FALSE;
+    }
+
+    if (ProcElevate(hwnd)) {
+        PostMessage(g_hwndMain, WM_CLOSE, 0, 0);
+        return TRUE;
+    }
+
+    MessageBoxW(hwnd, L"提权失败或已被取消。", L"提示", MB_OK | MB_ICONWARNING);
+    return FALSE;
+}
+
+/* 点在状态栏右端那一格（权限提示）上？命中则返回 TRUE。 */
+static BOOL HitAdminCell(HWND hwnd)
+{
+    POINT cursor, origin;
+    RECT rc;
+    int rightBound;
+
+    if (!g_hStatus || ProcIsElevated()) return FALSE;
+
+    if (!GetCursorPos(&cursor)) return FALSE;
+    if (!GetWindowRect(g_hStatus, &rc)) return FALSE;
+
+    /* 状态栏右下角转成主窗口客户区坐标 */
+    origin.x = rc.right;
+    origin.y = rc.bottom;
+    ScreenToClient(hwnd, &origin);
+
+    /* 右端那一格宽度取 220，与 LayoutMain 里 parts[0] 的划分一致 */
+    rightBound = origin.x - S(hwnd, 220);
+
+    return cursor.x >= rightBound && cursor.x <= origin.x
+        && cursor.y >= origin.y - S(hwnd, 24) && cursor.y <= origin.y;
+}
 
 static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
 {
@@ -554,6 +797,7 @@ static void ShowContextMenu(HWND hwnd, int item, int x, int y)
 typedef struct {
     PORT_ENTRY entry;
     HFONT hFont;
+    HICON icon;      /* 进程图标，WM_DESTROY 时 DestroyIcon */
 } DETAIL_CTX;
 
 static void SetCtlFont(HWND ctl, HFONT font)
@@ -635,6 +879,29 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* 先挂到窗口上：即便下面某步失败导致创建中止，WM_DESTROY 也能释放 ctx 与字体 */
         SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
         ctx->hFont = CreateUIFont(GetDpiOf(hwnd));
+        ctx->icon = NULL;
+
+        /*
+         * 进程图标：从 exe 里抽大图标。列表里不放图标是因为绝大多数行是
+         * svchost/System，图标几乎全一样，纯属浪费横向空间；详情窗口正是在
+         * 看这一个具体进程，图标能帮助确认「就是那个程序」。
+         * 抽不到（无路径、权限不足、非 exe）就跳过，不影响其它信息显示。
+         */
+        if (pe->procPath[0]) {
+            HICON hIcon = NULL;
+            /* iIconIndex=0 取第一个图标（通常是 256/48/32 的最大尺寸）；
+             * SS_ICON 会自行缩放到控件大小，不必挑特定尺寸。 */
+            if (ExtractIconExW(pe->procPath, 0, &hIcon, NULL, 1) == 0)
+                hIcon = NULL;
+            ctx->icon = hIcon;
+        }
+
+        if (ctx->icon) {
+            h = CreateWindowExW(0, L"Static", L"",
+                                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE,
+                                0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ICO, g_hInst, NULL);
+            SendMessage(h, STM_SETICON, ICON_SMALL, (LPARAM)ctx->icon);
+        }
 
         _snwprintf(buf, 512, L"%s  (PID %u)", ctx->entry.procName, ctx->entry.pid);
         h = CreateWindowExW(0, L"Static", buf, WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -725,7 +992,12 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bh = S(hwnd, 28);
         bw = S(hwnd, 110);
 
-        MoveCtl(hwnd, D_ST_NAME, pad, pad, w - pad * 2, S(hwnd, 20));
+        /* 有图标时给标题让出左侧空间；没有图标时标题回到最左，不留空位 */
+        {
+            int iconW = GetDlgItem(hwnd, D_ICO) ? S(hwnd, 34) : 0;
+            MoveCtl(hwnd, D_ICO, pad, pad, S(hwnd, 30), S(hwnd, 30));
+            MoveCtl(hwnd, D_ST_NAME, pad + iconW, pad, w - pad * 2 - iconW, S(hwnd, 20));
+        }
         MoveCtl(hwnd, D_ST_PATH, pad, pad + S(hwnd, 22), w - pad * 2, S(hwnd, 18));
         MoveCtl(hwnd, D_ED_PATH, pad, pad + S(hwnd, 40), w - pad * 2, S(hwnd, 24));
         MoveCtl(hwnd, D_ST_CMD, pad, pad + S(hwnd, 66), w - pad * 2, S(hwnd, 18));
@@ -788,6 +1060,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         if (ctx) {
             if (ctx->hFont) DeleteObject(ctx->hFont);
+            if (ctx->icon) DestroyIcon(ctx->icon);
             free(ctx);
         }
         SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
@@ -815,6 +1088,34 @@ static void OpenDetail(HWND parent, const PORT_ENTRY *e)
 
 /* ---------------------------------------------------------- 主窗口 */
 
+/*
+ * 列宽自适应：前 8 列按 COL_WIDTHS 固定，映像路径列吃掉列表剩下的全部宽度。
+ * 之前路径列写死 320px，而前面几列加起来已经接近甚至超过窗口宽度，路径被挤出可视区；
+ * 改成「前面的定宽 + 路径吃掉剩余」后，窗口怎么缩放路径列都完整可见。
+ */
+static void LayoutColumns(HWND hwnd)
+{
+    RECT rc;
+    int avail, fixed, pathW, i;
+
+    if (!g_hList) return;
+
+    GetClientRect(g_hList, &rc);
+    avail = rc.right;
+
+    fixed = 0;
+    for (i = 0; i < COL_PATH; ++i) {
+        int cx = S(hwnd, COL_WIDTHS[i]);
+        ListView_SetColumnWidth(g_hList, i, cx);
+        fixed += cx;
+    }
+
+    /* 留一点余量，避免正好卡在临界值上凭空多出一条横向滚动条 */
+    pathW = avail - fixed - S(hwnd, 2);
+    if (pathW < S(hwnd, COL_PATH_MIN)) pathW = S(hwnd, COL_PATH_MIN);
+    ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
+}
+
 static void LayoutMain(HWND hwnd)
 {
     RECT rc, rs;
@@ -829,9 +1130,25 @@ static void LayoutMain(HWND hwnd)
     pad = S(hwnd, 8);
     bh = S(hwnd, 26);
 
+    /*
+     * 状态栏高度必须在「状态栏自己的坐标系」里量，不能用 GetWindowRect：
+     * 那是屏幕坐标，窗口一旦不贴在 (0,0)，减出来的是负数或巨大值，
+     * 列表与信息栏就会被算到屏幕外面去。这里改用 MapWindowPoints 把它
+     * 换算到主窗口客户区坐标，再和 h 一起用。
+     */
     SendMessage(g_hStatus, WM_SIZE, 0, 0);
     GetWindowRect(g_hStatus, &rs);
-    sbH = rs.bottom - rs.top;
+    {
+        POINT ptTopLeft, ptBottomRight;
+        ptTopLeft.x = rs.left;
+        ptTopLeft.y = rs.top;
+        ptBottomRight.x = rs.right;
+        ptBottomRight.y = rs.bottom;
+        MapWindowPoints(NULL, hwnd, &ptTopLeft, 1);
+        MapWindowPoints(NULL, hwnd, &ptBottomRight, 1);
+        sbH = ptBottomRight.y - ptTopLeft.y;
+    }
+    if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     x = pad;
     MoveWindow(g_hEdit, x, S(hwnd, 6), S(hwnd, 260), bh, TRUE);
@@ -839,9 +1156,14 @@ static void LayoutMain(HWND hwnd)
     MoveWindow(g_hBtnRefresh, x, S(hwnd, 6), S(hwnd, 86), bh, TRUE);
     x += S(hwnd, 86) + S(hwnd, 8);
     MoveWindow(g_hChkAuto, x, S(hwnd, 9), S(hwnd, 140), bh, TRUE);
-    MoveWindow(g_hBtnAdmin, w - pad - S(hwnd, 180), S(hwnd, 6), S(hwnd, 180), bh, TRUE);
+    x += S(hwnd, 140) + S(hwnd, 12);
+    MoveWindow(g_hCbProto, x, S(hwnd, 6), S(hwnd, 104), S(hwnd, 200), TRUE);
+    x += S(hwnd, 104) + S(hwnd, 8);
+    MoveWindow(g_hChkListen, x, S(hwnd, 9), S(hwnd, 110), bh, TRUE);
 
-    MoveWindow(g_hList, 0, S(hwnd, 38), w, h - S(hwnd, 38) - sbH, TRUE);
+    MoveWindow(g_hList, 0, S(hwnd, 38), w, h - S(hwnd, 38) - sbH - S(hwnd, 26), TRUE);
+    MoveWindow(g_hInfoBar, 0, h - sbH - S(hwnd, 26), w, S(hwnd, 26), TRUE);
+    LayoutColumns(hwnd);
 
     parts[0] = w - S(hwnd, 220);
     if (parts[0] < 120) parts[0] = 120;
@@ -877,12 +1199,23 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_AUTO,
                                      g_hInst, NULL);
 
-        g_hBtnAdmin = CreateWindowExW(0, L"Button",
-                                      ProcIsElevated() ? L"✓ 已以管理员运行" : L"以管理员身份重启",
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_BTN_ADMIN,
-                                      g_hInst, NULL);
-        if (ProcIsElevated()) EnableWindow(g_hBtnAdmin, FALSE);
+        /* 协议下拉：0=全部 1=TCP 2=UDP 3=IPv4 4=IPv6，与 MatchProto 的取值一致 */
+        g_hCbProto = CreateWindowExW(0, L"ComboBox", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                     CBS_DROPDOWNLIST | WS_VSCROLL,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CB_PROTO,
+                                     g_hInst, NULL);
+        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"全部协议");
+        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 TCP");
+        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 UDP");
+        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv4");
+        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv6");
+        SendMessageW(g_hCbProto, CB_SETCURSEL, 0, 0);
+
+        g_hChkListen = CreateWindowExW(0, L"Button", L"仅监听端口",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_LISTEN,
+                                       g_hInst, NULL);
 
         /* LVS_OWNERDATA：虚拟列表，行文本按需提供，刷新时不必逐行重建 */
         g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -895,6 +1228,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ListView_SetExtendedListViewStyle(g_hList,
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                           LVS_EX_LABELTIP);
+        SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
 
         ZeroMemory(&col, sizeof(col));
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -903,6 +1237,16 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             col.cx = S(hwnd, COL_WIDTHS[i]);
             ListView_InsertColumn(g_hList, i, &col);
         }
+
+        /*
+         * 底部详情栏：选中行就能看到「进程 · PID · 路径」，不必双击开窗口。
+         * 这个工具的主场景是「谁占了这个端口」，答案就在这一行里，
+         * 藏在双击后面等于多绕一次。
+         */
+        g_hInfoBar = CreateWindowExW(WS_EX_CLIENTEDGE, L"Static", L"",
+                                     WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_INFOBAR,
+                                     g_hInst, NULL);
 
         g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
                                     WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -957,15 +1301,17 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
 
-        case ID_BTN_ADMIN:
-            if (MessageBoxW(hwnd,
-                            L"以管理员身份重启后可以查看并结束系统级进程。\n是否继续？",
-                            L"提权", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                if (ProcElevate(hwnd)) {
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
-                } else {
-                    MessageBoxW(hwnd, L"提权失败或已被取消。", L"提示", MB_OK | MB_ICONWARNING);
-                }
+        case ID_CB_PROTO:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                g_protoFilter = (int)SendMessage(g_hCbProto, CB_GETCURSEL, 0, 0);
+                ApplyView();
+            }
+            return 0;
+
+        case ID_CHK_LISTEN:
+            if (HIWORD(wp) == BN_CLICKED) {
+                g_listenOnly = (SendMessage(g_hChkListen, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                ApplyView();
             }
             return 0;
 
@@ -1016,6 +1362,21 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
+        case IDM_CLEAR:
+            /* Esc 一键复位: 只清文本框的话, 另外两个条件还留着, 用户会以为没生效 */
+            SetWindowTextW(g_hEdit, L"");
+            SendMessage(g_hCbProto, CB_SETCURSEL, 0, 0);
+            g_protoFilter = 0;
+            SendMessage(g_hChkListen, BM_SETCHECK, BST_UNCHECKED, 0);
+            g_listenOnly = 0;
+            ApplyView();
+            SetFocus(g_hList);
+            return 0;
+
+        case IDM_ELEVATE:
+            if (!ProcIsElevated()) ConfirmElevate(hwnd);
+            return 0;
+
         case IDM_COPY_PATH:
         {
             const PORT_ENTRY *e = SelectedEntry();
@@ -1061,6 +1422,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
 
+    case WM_LBUTTONDOWN:
+        if (HitAdminCell(hwnd)) {
+            ConfirmElevate(hwnd);
+            return 0;
+        }
+        return 0;
+
     case WM_NOTIFY:
     {
         NMHDR *hdr = (NMHDR *)lp;
@@ -1103,6 +1471,14 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 return 0;
             }
+            if (hdr->code == LVN_ITEMCHANGED) {
+                NMLISTVIEW *nv = (NMLISTVIEW *)lp;
+                if ((nv->uChanged & LVIF_STATE) &&
+                    (nv->uNewState ^ nv->uOldState) & (LVIS_SELECTED | LVIS_FOCUSED)) {
+                    UpdateInfoBar();
+                }
+                return 0;
+            }
             if (hdr->code == LVN_COLUMNCLICK) {
                 int col = ((NMLISTVIEW *)lp)->iSubItem;
                 if (col == g_sortCol) {
@@ -1140,6 +1516,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         KillTimer(hwnd, ID_TIMER);
+        g_hInfoBar = NULL;
         free(g_all);
         free(g_view);
         g_all = NULL;
@@ -1158,7 +1535,7 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     HWND hwnd;
     MSG msg;
     HACCEL hAccel;
-    ACCEL accels[2];
+    ACCEL accels[9];
     UINT dpi;
 
     g_hInst = hInst;
@@ -1214,7 +1591,37 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     accels[1].fVirt = FVIRTKEY | FCONTROL;
     accels[1].key = 'F';
     accels[1].cmd = ID_EDIT_FILTER;
-    hAccel = CreateAcceleratorTableW(accels, 2);
+
+    /* 工具类软件的常用操作交给键盘：查看详情、结束进程、复制行都要能一按到底 */
+    accels[2].fVirt = FVIRTKEY;
+    accels[2].key = VK_RETURN;
+    accels[2].cmd = IDM_DETAIL;
+
+    accels[3].fVirt = FVIRTKEY;
+    accels[3].key = VK_DELETE;
+    accels[3].cmd = IDM_KILL;
+
+    accels[4].fVirt = FVIRTKEY | FCONTROL;
+    accels[4].key = 'C';
+    accels[4].cmd = IDM_COPY_ROW;
+
+    accels[5].fVirt = FVIRTKEY | FCONTROL;
+    accels[5].key = 'A';
+    accels[5].cmd = IDM_COPY_PATH;
+
+    accels[6].fVirt = FVIRTKEY;
+    accels[6].key = VK_ESCAPE;
+    accels[6].cmd = IDM_CLEAR;
+
+    accels[7].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
+    accels[7].key = 'E';
+    accels[7].cmd = IDM_ELEVATE;
+
+    accels[8].fVirt = FVIRTKEY | FSHIFT;
+    accels[8].key = VK_TAB;
+    accels[8].cmd = IDM_KILL_TREE;
+
+    hAccel = CreateAcceleratorTableW(accels, 9);
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (!hAccel || !TranslateAcceleratorW(hwnd, hAccel, &msg)) {

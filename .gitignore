@@ -9,3 +9,7 @@ dist/
 *.exe
 generated-images/
 .codebuddy/
+
+# 本地临时验证产物（截图、临时脚本），不提交
+work/
+build_ui/
