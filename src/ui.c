@@ -1022,7 +1022,13 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             h = CreateWindowExW(0, L"Static", L"",
                                 WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE,
                                 0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ICO, g_hInst, NULL);
-            SendMessage(h, STM_SETICON, ICON_SMALL, (LPARAM)ctx->icon);
+            /*
+             * SS_ICON 静态控件在这里把图标句柄放 wParam，与 MSDN 记载的
+             * wParam=ICON_BIG/ICON_SMALL 写法相反。这是实测结果，不是文档约定：
+             * 按文档写法发，控件只画出一个灰块，图标一个都不显示。
+             * 仅适用于 SS_ICON，别套到普通静态控件或 WM_SETICON 上。
+             */
+            SendMessage(h, STM_SETICON, (WPARAM)ctx->icon, 0);
         }
 
         _snwprintf(buf, 512, L"%s  (PID %u)", ctx->entry.procName, ctx->entry.pid);
@@ -1114,19 +1120,20 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bh = S(hwnd, 28);
         bw = S(hwnd, 110);
 
-        /* 有图标时给标题让出左侧空间；没有图标时标题回到最左，不留空位 */
+        /* 图标位于名称（PID）左侧；标题行须容纳完整图标，避免与映像路径标签重叠。 */
         {
             int iconW = GetDlgItem(hwnd, D_ICO) ? S(hwnd, 34) : 0;
             MoveCtl(hwnd, D_ICO, pad, pad, S(hwnd, 30), S(hwnd, 30));
             MoveCtl(hwnd, D_ST_NAME, pad + iconW, pad, w - pad * 2 - iconW, S(hwnd, 20));
+            y = pad + S(hwnd, iconW ? 32 : 22);
         }
-        MoveCtl(hwnd, D_ST_PATH, pad, pad + S(hwnd, 22), w - pad * 2, S(hwnd, 18));
-        MoveCtl(hwnd, D_ED_PATH, pad, pad + S(hwnd, 40), w - pad * 2, S(hwnd, 24));
-        MoveCtl(hwnd, D_ST_CMD, pad, pad + S(hwnd, 66), w - pad * 2, S(hwnd, 18));
-        MoveCtl(hwnd, D_ED_CMD, pad, pad + S(hwnd, 84), w - pad * 2, S(hwnd, 58));
-        MoveCtl(hwnd, D_ST_MOD, pad, pad + S(hwnd, 144), w - pad * 2, S(hwnd, 18));
+        MoveCtl(hwnd, D_ST_PATH, pad, y, w - pad * 2, S(hwnd, 18));
+        MoveCtl(hwnd, D_ED_PATH, pad, y + S(hwnd, 18), w - pad * 2, S(hwnd, 24));
+        MoveCtl(hwnd, D_ST_CMD, pad, y + S(hwnd, 44), w - pad * 2, S(hwnd, 18));
+        MoveCtl(hwnd, D_ED_CMD, pad, y + S(hwnd, 62), w - pad * 2, S(hwnd, 58));
+        MoveCtl(hwnd, D_ST_MOD, pad, y + S(hwnd, 122), w - pad * 2, S(hwnd, 18));
 
-        y = pad + S(hwnd, 162);
+        y += S(hwnd, 140);
         MoveCtl(hwnd, D_LIST_MOD, pad, y, w - pad * 2, h - y - pad - bh - S(hwnd, 8));
 
         x = w - pad;
