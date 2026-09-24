@@ -27,6 +27,7 @@
 #define ID_CB_PROTO    1008
 #define ID_CHK_LISTEN  1009
 #define ID_INFOBAR     1010    /* 底部选中项详情栏 */
+#define ID_CHK_SYS     1011    /* 隐藏系统关键进程占用的端口 */
 
 #define IDM_OPEN_LOC   2001
 #define IDM_DETAIL     2002
@@ -36,8 +37,18 @@
 #define IDM_COPY_PID   2006
 #define IDM_COPY_ROW   2007
 #define IDM_FILTER_SEL 2008
-#define IDM_CLEAR      2009    /* Esc: 清空筛选框与两个结构化条件 */
+#define IDM_CLEAR      2009    /* Esc: 清空筛选框与所有结构化条件 */
 #define IDM_ELEVATE    2010    /* Ctrl+Shift+E: 提权重启 */
+
+/* 菜单栏「筛选」下的命令 */
+#define IDM_AUTO       2020
+#define IDM_LISTEN     2021
+#define IDM_HIDESYS    2022
+#define IDM_PROTO_ALL  2030
+#define IDM_PROTO_TCP  2031
+#define IDM_PROTO_UDP  2032
+#define IDM_PROTO_V4   2033
+#define IDM_PROTO_V6   2034
 
 #define D_ED_PATH      3001
 #define D_ED_CMD       3002
@@ -84,9 +95,6 @@ static HWND g_hwndMain;
 static HWND g_hList;
 static HWND g_hEdit;
 static HWND g_hBtnRefresh;
-static HWND g_hChkAuto;
-static HWND g_hCbProto;
-static HWND g_hChkListen;
 static HWND g_hInfoBar;
 static HWND g_hStatus;
 static HFONT g_hFont;
@@ -108,6 +116,7 @@ static void UpdateInfoBar(void);
 /* 顶栏的两个结构化筛选，与文本框是「与」的关系：文本框管模糊匹配，这两个管精确范围 */
 static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
 static int g_listenOnly = 0;    /* 1=只看监听端口 */
+static int g_hideSystem = 0;    /* 1=隐藏系统关键进程占用的端口 */
 static BOOL g_autoOn = TRUE;    /* 自动刷新勾选框状态 */
 static BOOL g_hadInitialSelect = FALSE;   /* 首次载入是否已做过默认选中 */
 
@@ -281,6 +290,36 @@ static COLORREF StateTextColor(const WCHAR *state)
 }
 
 /*
+ * 系统关键进程名单。列在这里的进程一旦被结束，轻则服务失效、重则蓝屏，
+ * 而它们的端口又大多由系统自己占用，排查时几乎不会真去动它，所以提供开关整体屏蔽。
+ *
+ * svchost 是特例：它同时托管 DNS 客户端、DHCP、事件日志、Windows 更新等一堆服务，
+ * 屏蔽后这些端口会一起消失。开关默认关闭，且 Esc 可一键复位，就是为了不让人
+ * 在需要查这些端口时找不到回来的路。
+ */
+static const WCHAR *const SYSTEM_OWNERS[] = {
+    L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe",
+    L"lsass.exe", L"lsm.exe", L"smss.exe", L"svchost.exe",
+    L"dwm.exe", L"spoolsv.exe", L"fontdrvhost.exe",
+    /* 内核态伪进程：没有 exe，按 Toolhelp 报出的名字匹配 */
+    L"Registry", L"Memory Compression", L"Secure System", L"System"
+};
+
+static BOOL IsSystemOwner(const PORT_ENTRY *e)
+{
+    size_t i;
+    size_t n = sizeof(SYSTEM_OWNERS) / sizeof(SYSTEM_OWNERS[0]);
+
+    /* PID 0 / 4 是内核本体，名字可能被本地化，认 PID 更稳 */
+    if (e->pid == 0 || e->pid == 4) return TRUE;
+
+    for (i = 0; i < n; ++i) {
+        if (_wcsicmp(e->procName, SYSTEM_OWNERS[i]) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+/*
  * 协议范围筛选。协议名与地址列的 TCP6/UDP6 前后缀已经区分了 IPv4/IPv6，
  * 所以这里直接按字符串判断，不再依赖 ports.c 暴露额外标志位。
  */
@@ -338,9 +377,63 @@ static int CmpEntry(const void *pa, const void *pb)
     return g_sortAsc ? r : -r;
 }
 
+/*
+ * 顶部菜单栏。
+ *
+ * 筛选条件放菜单而不是工具栏，是因为 Win32 的下拉式 ComboBox 拒绝高于字体算出的
+ * 自然高度（实测 CBS_DROPDOWNLIST / CBS_DROPDOWN / CBS_NOINTEGRALHEIGHT 全部无效，
+ * CB_SETITEMHEIGHT 也不生效），硬留在工具栏里就永远和旁边的按钮差一截。
+ * 勾选项做成菜单项天生没有高度问题，勾选标记也比复选框更醒目。
+ */
+static HMENU BuildMainMenu(void)
+{
+    HMENU bar, filter, proto;
+
+    filter = CreatePopupMenu();
+    AppendMenuW(filter, MF_STRING, IDM_AUTO, L"自动刷新(&A)\tCtrl+Shift+R");
+    AppendMenuW(filter, MF_STRING, IDM_LISTEN, L"仅监听端口(&L)");
+    AppendMenuW(filter, MF_STRING, IDM_HIDESYS, L"隐藏系统端口(&S)");
+    AppendMenuW(filter, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(filter, MF_STRING, IDM_CLEAR, L"清除全部筛选(&C)\tEsc");
+
+    proto = CreatePopupMenu();
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_ALL, L"全部协议(&A)");
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_TCP, L"仅 TCP(&T)");
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_UDP, L"仅 UDP(&U)");
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_V4,  L"仅 IPv4(&4)");
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_V6,  L"仅 IPv6(&6)");
+    AppendMenuW(filter, MF_POPUP, (UINT_PTR)proto, L"协议(&P)");
+
+    bar = CreateMenu();
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)filter, L"筛选(&F)");
+    return bar;
+}
+
+/* 把当前筛选状态回写到菜单勾选标记上。所有改状态的地方都要走这里，别各写各的。 */
+static void SyncFilterMenu(void)
+{
+    HMENU bar = GetMenu(g_hwndMain);
+    HMENU filter, proto;
+
+    if (!bar) return;
+    filter = GetSubMenu(bar, 0);
+    if (!filter) return;
+
+    CheckMenuItem(filter, IDM_AUTO, MF_BYCOMMAND | (g_autoOn ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(filter, IDM_LISTEN, MF_BYCOMMAND | (g_listenOnly ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(filter, IDM_HIDESYS, MF_BYCOMMAND | (g_hideSystem ? MF_CHECKED : MF_UNCHECKED));
+
+    proto = GetSubMenu(filter, 5);
+    if (proto) {
+        CheckMenuRadioItem(proto, IDM_PROTO_ALL, IDM_PROTO_V6,
+                           IDM_PROTO_ALL + g_protoFilter, MF_BYCOMMAND);
+    }
+}
+
 static void UpdateStatus(void)
 {
     WCHAR text[320];
+    WCHAR cond[160];
     SYSTEMTIME st;
     size_t listen = 0, i;
 
@@ -350,14 +443,30 @@ static void UpdateStatus(void)
 
     GetLocalTime(&st);
 
+    /*
+     * 生效中的筛选条件直接拼进状态栏。勾选项都搬进菜单后，不打开菜单就看不见
+     * 当前到底滤了什么，列表突然变短会让人以为程序出问题了。
+     */
+    {
+        static const WCHAR *const PROTO_TEXT[5] = {
+            L"", L"仅 TCP · ", L"仅 UDP · ", L"仅 IPv4 · ", L"仅 IPv6 · "
+        };
+        size_t k = 0;
+        cond[0] = 0;
+        if (g_protoFilter) k = (size_t)_snwprintf(cond, 160, L"%s", PROTO_TEXT[g_protoFilter]);
+        if (g_listenOnly && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"仅监听 · ");
+        if (g_hideSystem && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"已隐藏系统端口 · ");
+        if (g_autoOn && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"自动刷新 · ");
+    }
+
     if (g_enumFailed) {
         _snwprintf(text, 320,
                    L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
                    st.wHour, st.wMinute, st.wSecond);
     } else {
-        _snwprintf(text, 320, L"共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %02d:%02d:%02d",
+        _snwprintf(text, 320, L"共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
                    (unsigned)g_allCount, (unsigned)listen, (unsigned)g_viewCount,
-                   st.wHour, st.wMinute, st.wSecond);
+                   cond, st.wHour, st.wMinute, st.wSecond);
     }
     text[319] = 0;
 
@@ -385,6 +494,8 @@ static const WCHAR *EmptyHintText(void)
     /* 区分两种「空」：本来就没数据，与有数据但被筛选条件滤光。
      * 后者必须提示去清条件，否则用户会以为程序坏了。 */
     if (g_allCount == 0) return L"当前没有检测到端口占用";
+    if (g_hideSystem)
+        return L"没有符合当前条件的端口\n当前已隐藏系统关键进程占用的端口\n试试取消「隐藏系统端口」";
     if (g_listenOnly || g_protoFilter != 0)
         return L"没有符合当前筛选条件的端口\n试试取消「仅监听端口」或切换协议";
     if (g_allCount > 0)
@@ -521,11 +632,12 @@ static void ApplyView(void)
                 const PORT_ENTRY *e = &g_all[i];
                 BOOL listening = (_wcsicmp(e->state, L"监听") == 0);
 
-                /* 三个条件是「与」：文本框模糊匹配 + 协议范围 + 仅监听
+                /* 四个条件是「与」：文本框模糊匹配 + 协议范围 + 仅监听 + 屏蔽系统端口
                  * UDP 没有连接状态，本身就是常驻端口，所以不参与「仅监听」判定，
                  * 否则勾上之后 UDP 会整片消失。 */
                 if (g_listenOnly && !e->state[0]) continue;
                 if (g_listenOnly && !listening) continue;
+                if (g_hideSystem && IsSystemOwner(e)) continue;
                 if (!MatchProto(e, g_protoFilter)) continue;
                 if (!MatchFilter(e, filter)) continue;
 
@@ -1126,212 +1238,10 @@ static void LayoutColumns(HWND hwnd)
     ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
 }
 
-/*
- * 工具栏视觉统一。
- *
- * 勾选框用 BS_OWNERDRAW 自绘，按钮的边框、底色、按下与勾选高亮都由
- * DrawCheckButton 画，和「刷新 (F5)」走同一套配色；ComboBox 保留主题，
- * 以画完整边框和箭头。控件的顶边和高度由 LayoutMain 统一计算。
- */
-static void MakeToolbarFlat(void)
-{
-    SetWindowTheme(g_hChkAuto, L"", L"");
-    SetWindowTheme(g_hChkListen, L"", L"");
-    SetWindowTheme(g_hCbProto, L"Explorer", NULL);
-}
-
-/*
- * 勾选框自绘。系统自带的 BS_AUTOCHECKBOX 不管控件多高，方框和文字永远只占
- * 中间那一小块，上下留白后看着就只有旁边按钮一半高；加 BS_PUSHBUTTON 也救不
- * 回来，因为勾选框的绘制分支优先级更高，根本不画按钮边框。
- * 干脆自己按控件高度铺满：底色、边框、勾选标记、按下反馈都自己算，
- * 这样工具栏一排控件的外框高度才是真正一致的。
- */
-static void DrawCheckButton(HWND hwnd, DRAWITEMSTRUCT *di)
-{
-    HWND ctl = di->hwndItem;
-    RECT rc = di->rcItem;
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
-    BOOL on = (GetDlgCtrlID(ctl) == ID_CHK_AUTO) ? g_autoOn : (g_listenOnly != 0);
-    BOOL down = (di->itemState & ODS_SELECTED) != 0;
-    BOOL gray = (di->itemState & ODS_DISABLED) != 0;
-    BOOL focus = (di->itemState & ODS_FOCUS) != 0;
-    HFONT font = (HFONT)SendMessage(ctl, WM_GETFONT, 0, 0);
-    COLORREF accent = GetSysColor(gray ? COLOR_GRAYTEXT : COLOR_HIGHLIGHT);
-    COLORREF face, line, text;
-    HDC dc;
-    HBITMAP bmp;
-    HGDIOBJ oldBmp, oldFont;
-    int box, pad, tx;
-    int penW;
-    WCHAR label[64];
-    RECT textRc;
-
-    if (w <= 0 || h <= 0) return;
-
-    if (gray) {
-        face = RGB(240, 240, 240);
-        line = RGB(173, 173, 173);
-        text = RGB(128, 128, 128);
-    } else if (on) {
-        face = down ? accent : RGB(0, 120, 215);
-        line = down ? accent : RGB(0, 95, 184);
-        text = RGB(255, 255, 255);
-    } else {
-        face = down ? RGB(229, 229, 229) : GetSysColor(COLOR_BTNFACE);
-        line = GetSysColor(COLOR_3DLIGHT);
-        text = GetSysColor(COLOR_BTNTEXT);
-    }
-
-    dc = CreateCompatibleDC(di->hDC);
-    bmp = CreateCompatibleBitmap(di->hDC, w, h);
-    if (!dc || !bmp) {
-        if (dc) DeleteDC(dc);
-        if (bmp) DeleteObject(bmp);
-        return;
-    }
-    oldBmp = SelectObject(dc, bmp);
-    oldFont = font ? SelectObject(dc, font) : NULL;
-
-    SetBkMode(dc, TRANSPARENT);
-
-    /* 外框：1 像素边线，比按钮的立体边更安静，勾选时再整体换成主色 */
-    {
-        HBRUSH br = CreateSolidBrush(face);
-        FillRect(dc, &rc, br);
-        DeleteObject(br);
-    }
-    {
-        RECT edge = rc;
-        HBRUSH br = CreateSolidBrush(line);
-        FrameRect(dc, &edge, br);
-        DeleteObject(br);
-    }
-
-    box = MulDiv(h, 3, 5);
-    if (box < MulDiv(h, 2, 5)) box = MulDiv(h, 2, 5);
-    if (box > MulDiv(h, 3, 4)) box = MulDiv(h, 3, 4);
-    pad = MulDiv(w, 1, 16) + 1;
-
-    {
-        int bx = pad;
-        int by = (h - box) / 2;
-        RECT b = { bx, by, bx + box, by + box };
-
-        if (on || gray) {
-            HBRUSH br = CreateSolidBrush(accent);
-            FillRect(dc, &b, br);
-            DeleteObject(br);
-        } else {
-            HBRUSH br = CreateSolidBrush(RGB(255, 255, 255));
-            FillRect(dc, &b, br);
-            DeleteObject(br);
-        }
-        {
-            RECT e = b;
-            HBRUSH br = CreateSolidBrush(on || gray ? accent : line);
-            FrameRect(dc, &e, br);
-            DeleteObject(br);
-        }
-
-        if (on) {
-            /* 勾：两段折线，白色圆头画笔 */
-            HPEN pen = CreatePen(PS_SOLID | PS_ENDCAP_ROUND,
-                                 penW = box / 7 < 2 ? 2 : box / 7,
-                                 GetSysColor(COLOR_WINDOW));
-            HGDIOBJ oldPen = SelectObject(dc, pen);
-            int m = box / 6;
-            int x1 = bx + box * 22 / 100;
-            int y1 = by + box * 52 / 100;
-            int x2 = bx + box * 42 / 100;
-            int y2 = by + box * 74 / 100;
-            int x3 = bx + box * 78 / 100;
-            int y3 = by + box * 28 / 100;
-            MoveToEx(dc, x1 + m, y1, NULL);
-            LineTo(dc, x2, y2);
-            LineTo(dc, x3 + m, y3);
-            SelectObject(dc, oldPen);
-            DeleteObject(pen);
-        }
-    }
-
-    tx = pad * 2 + box;
-    textRc.left = tx;
-    textRc.right = w - pad;
-    textRc.top = 0;
-    textRc.bottom = h;
-    SetTextColor(dc, text);
-    GetWindowTextW(ctl, label, 64);
-    DrawTextW(dc, label, -1, &textRc,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    if (focus) {
-        /* 框整个控件而不是只框文字，跟原生按钮的焦点提示对得上 */
-        RECT f = { 2, 2, w - 3, h - 3 };
-        DrawFocusRect(dc, &f);
-    }
-
-    BitBlt(di->hDC, 0, 0, w, h, dc, 0, 0, SRCCOPY);
-
-    if (oldFont) SelectObject(dc, oldFont);
-    SelectObject(dc, oldBmp);
-    DeleteObject(bmp);
-    DeleteDC(dc);
-    UNREFERENCED_PARAMETER(hwnd);
-}
-
-/*
- * 自绘勾选框的勾选状态。
- *
- * BS_OWNERDRAW 的按钮类不处理 BM_GETCHECK/BM_SETCHECK，状态完全归绘制方管；
- * 同样也不会替我们翻转勾选、也不会发 BN_CLICKED。所以状态存在 g_autoOn /
- * g_listenOnly 里，鼠标点击和空格键在下面这个子类里自己接。
- *
- * 副作用按「目标状态」施加（按状态起停定时器、按状态过滤）而不是「翻转」，
- * 所以万一系统又补发了一次 BN_CLICKED，重复调用也只是重算一遍，不会翻回去。
- */
-static LRESULT CALLBACK CheckSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                          UINT_PTR id, DWORD_PTR ref)
-{
-    LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-    UNREFERENCED_PARAMETER(id);
-    UNREFERENCED_PARAMETER(ref);
-
-    if (msg == WM_LBUTTONUP || (msg == WM_KEYUP && wp == VK_SPACE)) {
-        HWND parent;
-        int ctrlId = GetDlgCtrlID(hwnd);
-
-        /* 按下后在控件外松开不算一次点击，否则拖出边界再松手也会误翻勾 */
-        if (msg == WM_LBUTTONUP) {
-            RECT rc;
-            int x = (int)(short)LOWORD(lp);
-            int y = (int)(short)HIWORD(lp);
-            GetClientRect(hwnd, &rc);
-            if (x < rc.left || x >= rc.right || y < rc.top || y >= rc.bottom)
-                return r;
-        }
-
-        parent = GetParent(hwnd);
-        if (ctrlId == ID_CHK_AUTO) {
-            g_autoOn = !g_autoOn;
-            InvalidateRect(hwnd, NULL, TRUE);
-            if (g_autoOn) SetTimer(parent, ID_TIMER, REFRESH_MS, NULL);
-            else KillTimer(parent, ID_TIMER);
-        } else if (ctrlId == ID_CHK_LISTEN) {
-            g_listenOnly = !g_listenOnly;
-            InvalidateRect(hwnd, NULL, TRUE);
-            ApplyView();
-        }
-    }
-
-    return r;
-}
-
 static void LayoutMain(HWND hwnd)
 {
     RECT rc, rs;
-    int w, h, pad, bh, toolbarY, sbH, x;
+    int w, h, pad, bh, toolbarY, sbH;
     int parts[2];
 
     if (!g_hList) return;
@@ -1364,86 +1274,23 @@ static void LayoutMain(HWND hwnd)
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     /*
-     * 工具栏按可用宽度自适应。
-     * 之前五个控件固定累加 x，总宽约 750px，而窗口最小可缩到 640px，
-     * 窗口一窄，右侧的协议下拉和「仅监听端口」就被推出可视区看不见了。
-     *
-     * 策略：筛选框是弹性控件吃掉剩余宽度；其余控件按「刷新 → 协议 → 自动刷新 →
-     * 仅监听」的优先级从右往左折叠，宽度不够时先收起信息量最低的那个。
-     * 勾选框收起时同步清掉勾选状态，否则用户看不到勾却仍被过滤。
+     * 工具栏只剩筛选框与刷新按钮两个控件，高度都由 bh 统一给，
+     * 不会再出现某一类控件比旁边矮一截的情况。
+     * 筛选条件全在顶部菜单栏里，这里不再需要折叠逻辑。
      */
     {
         int gap = S(hwnd, 8);
-        int wEdit = S(hwnd, 150), wEditMax = S(hwnd, 260);
         int wRefresh = S(hwnd, 86);
-        int wAuto = S(hwnd, 140);
-        int wProto = S(hwnd, 104);
-        int wListen = S(hwnd, 110);
-        int fixedW, avail;
+        int wEdit = w - pad * 2 - gap - wRefresh;
+        int x = pad;
 
-        /* 先按「全部显示」算一遍，固定部分含筛选框最小宽与各控件间距 */
-        fixedW = wEdit + gap + wRefresh + gap + wAuto + gap + wProto + gap + wListen;
-        avail = w - pad * 2;
-
-        /* 折叠优先级：仅监听 > 自动刷新 > 协议 > 筛选框收缩 */
-        if (avail < fixedW) fixedW -= wListen;
-        if (avail < fixedW) fixedW -= wAuto;
-        if (avail < fixedW) fixedW -= wProto;
-
-        /* 筛选框弹性：先吃 min，剩余的按上限截断 */
-        wEdit = avail - (fixedW - wEdit);
-        if (wEdit > wEditMax) wEdit = wEditMax;
+        /* 筛选框吃剩余宽度，但别窄到看不清占位提示 */
+        if (wEdit > S(hwnd, 520)) wEdit = S(hwnd, 520);
         if (wEdit < S(hwnd, 110)) wEdit = S(hwnd, 110);
 
-        {
-            /*
-             * 是否放得下，要用「各控件自然宽度之和」判断，不能用收缩后的 wEdit：
-             * 收缩是放不下时的补救，拿补救后的值再判断会自我印证，
-             * 出现窗口明明够宽却仍把控件藏起来的死循环。
-             */
-            int needListen = wEditMax + gap + wRefresh + gap + wAuto + gap + wProto + gap + wListen;
-            int needAuto   = wEditMax + gap + wRefresh + gap + wAuto + gap + wProto + gap;
-            int needProto  = wEditMax + gap + wRefresh + gap + wAuto + gap;
-
-            BOOL showListen = (avail >= needListen);
-            BOOL showAuto   = (avail >= needAuto);
-            BOOL showProto  = (avail >= needProto);
-
-            x = pad;
-            MoveWindow(g_hEdit, x, toolbarY, wEdit, bh, TRUE);
-            x += wEdit + gap;
-
-            MoveWindow(g_hBtnRefresh, x, toolbarY, wRefresh, bh, TRUE);
-            x += wRefresh + gap;
-
-            if (showAuto) {
-                MoveWindow(g_hChkAuto, x, toolbarY, wAuto, bh, TRUE);
-                ShowWindow(g_hChkAuto, SW_SHOW);
-                /* 窗口从窄拉回宽时要恢复定时器，否则收起一次就再也刷不上了；
-                 * 是否该刷以复选框的勾选状态为准，不在这里强行开或关。 */
-                if (g_autoOn)
-                    SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
-                else
-                    KillTimer(hwnd, ID_TIMER);
-                x += wAuto + gap;
-            } else {
-                ShowWindow(g_hChkAuto, SW_HIDE);
-                KillTimer(hwnd, ID_TIMER);
-            }
-
-            if (showProto) {
-                MoveWindow(g_hCbProto, x, toolbarY, wProto, S(hwnd, 200), TRUE);
-                x += wProto + gap;
-            } else {
-                ShowWindow(g_hCbProto, SW_HIDE);
-            }
-
-            if (showListen) {
-                MoveWindow(g_hChkListen, x, toolbarY, wListen, bh, TRUE);
-            } else {
-                ShowWindow(g_hChkListen, SW_HIDE);
-            }
-        }
+        MoveWindow(g_hEdit, x, toolbarY, wEdit, bh, TRUE);
+        x += wEdit + gap;
+        MoveWindow(g_hBtnRefresh, x, toolbarY, wRefresh, bh, TRUE);
     }
 
     MoveWindow(g_hList, 0, S(hwnd, 38), w, h - S(hwnd, 38) - sbH - S(hwnd, 26), TRUE);
@@ -1480,33 +1327,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         g_hInst, NULL);
 
         /*
-         * BS_OWNERDRAW 让勾选框按控件整块高度自绘，外观与「刷新 (F5)」对齐。
-         * 按钮类不再替我们管勾选，状态存 g_autoOn / g_listenOnly，
-         * 点击与空格键由 CheckSubclassProc 接。
-         */
-        g_hChkAuto = CreateWindowExW(0, L"Button", L"自动刷新 (3s)",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_AUTO,
-                                     g_hInst, NULL);
-
-        /* 协议下拉：0=全部 1=TCP 2=UDP 3=IPv4 4=IPv6，与 MatchProto 的取值一致 */
-        g_hCbProto = CreateWindowExW(0, L"ComboBox", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                     CBS_DROPDOWNLIST | WS_VSCROLL,
-                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CB_PROTO,
-                                     g_hInst, NULL);
-        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"全部协议");
-        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 TCP");
-        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 UDP");
-        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv4");
-        SendMessageW(g_hCbProto, CB_ADDSTRING, 0, (LPARAM)L"仅 IPv6");
-        SendMessageW(g_hCbProto, CB_SETCURSEL, 0, 0);
-        SetWindowTheme(g_hCbProto, L"Explorer", NULL);
-
-        g_hChkListen = CreateWindowExW(0, L"Button", L"仅监听端口",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_CHK_LISTEN,
-                                       g_hInst, NULL);
+         * g_hInst, NULL);
 
         /* LVS_OWNERDATA：虚拟列表，行文本按需提供，刷新时不必逐行重建 */
         g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -1520,8 +1341,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                           LVS_EX_LABELTIP);
         SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
-        SetWindowSubclass(g_hChkAuto, CheckSubclassProc, 2, 0);
-        SetWindowSubclass(g_hChkListen, CheckSubclassProc, 2, 0);
 
         ZeroMemory(&col, sizeof(col));
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -1552,8 +1371,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_autoOn = TRUE;
         SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
 
-        MakeToolbarFlat();
-
         LayoutMain(hwnd);
         ReloadAndApply();
         return 0;
@@ -1571,13 +1388,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTextColor((HDC)wp, RGB(0, 0, 0));
         SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-
-    case WM_DRAWITEM:
-        if (wp == ID_CHK_AUTO || wp == ID_CHK_LISTEN) {
-            DrawCheckButton(hwnd, (DRAWITEMSTRUCT *)lp);
-            return TRUE;
-        }
-        return FALSE;
 
     case WM_DPICHANGED:
     {
@@ -1602,29 +1412,35 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReloadAndApply();
             return 0;
 
-        case ID_CHK_AUTO:
-            /* 勾选与定时器的同步由 CheckSubclassProc 完成；这里只兜住
-             * 系统补发的 BN_CLICKED，动作按状态施加，重复执行无副作用。 */
-            if (HIWORD(wp) == BN_CLICKED) {
-                if (g_autoOn) {
-                    SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
-                } else {
-                    KillTimer(hwnd, ID_TIMER);
-                }
-            }
+        case IDM_AUTO:
+            g_autoOn = !g_autoOn;
+            if (g_autoOn) SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
+            else KillTimer(hwnd, ID_TIMER);
+            SyncFilterMenu();
+            UpdateStatus();
             return 0;
 
-        case ID_CB_PROTO:
-            if (HIWORD(wp) == CBN_SELCHANGE) {
-                g_protoFilter = (int)SendMessage(g_hCbProto, CB_GETCURSEL, 0, 0);
-                ApplyView();
-            }
+        case IDM_LISTEN:
+            g_listenOnly = !g_listenOnly;
+            SyncFilterMenu();
+            ApplyView();
             return 0;
 
-        case ID_CHK_LISTEN:
-            if (HIWORD(wp) == BN_CLICKED) {
-                ApplyView();
-            }
+        case IDM_HIDESYS:
+            g_hideSystem = !g_hideSystem;
+            SyncFilterMenu();
+            ApplyView();
+            return 0;
+
+        case IDM_PROTO_ALL:
+        case IDM_PROTO_TCP:
+        case IDM_PROTO_UDP:
+        case IDM_PROTO_V4:
+        case IDM_PROTO_V6:
+            /* 协议子菜单的 5 项连续编号，偏移即 MatchProto 的取值 */
+            g_protoFilter = LOWORD(wp) - IDM_PROTO_ALL;
+            SyncFilterMenu();
+            ApplyView();
             return 0;
 
         case ID_EDIT_FILTER:
@@ -1675,12 +1491,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         case IDM_CLEAR:
-            /* Esc 一键复位: 只清文本框的话, 另外两个条件还留着, 用户会以为没生效 */
+            /* Esc 一键复位：文本框和结构化条件要一起清，
+             * 只清文本框的话菜单里还留着勾，用户会以为没生效 */
             SetWindowTextW(g_hEdit, L"");
-            SendMessage(g_hCbProto, CB_SETCURSEL, 0, 0);
             g_protoFilter = 0;
             g_listenOnly = 0;
-            InvalidateRect(g_hChkListen, NULL, TRUE);
+            g_hideSystem = 0;
+            SyncFilterMenu();
             ApplyView();
             SetFocus(g_hList);
             return 0;
@@ -1847,7 +1664,8 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     HWND hwnd;
     MSG msg;
     HACCEL hAccel;
-    ACCEL accels[9];
+    ACCEL accels[10];
+    HMENU menu;
     UINT dpi;
 
     g_hInst = hInst;
@@ -1887,12 +1705,18 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
         if (p) dpi = p();
     }
 
+    /* 菜单必须在建窗前建好：hMenu 参数只在创建时生效，之后只能 SetMenu */
+    menu = BuildMainMenu();
+    if (!menu) return 1;
+
     hwnd = CreateWindowExW(0, MAIN_CLASS, L"端口占用查看器 — PortView",
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                            CW_USEDEFAULT, CW_USEDEFAULT,
                            MulDiv(980, (int)dpi, 96), MulDiv(620, (int)dpi, 96),
-                           NULL, NULL, hInst, NULL);
-    if (!hwnd) return 1;
+                           NULL, menu, hInst, NULL);
+    if (!hwnd) { DestroyMenu(menu); return 1; }
+
+    SyncFilterMenu();
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
@@ -1932,6 +1756,10 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     accels[8].fVirt = FVIRTKEY | FSHIFT;
     accels[8].key = VK_TAB;
     accels[8].cmd = IDM_KILL_TREE;
+
+    accels[9].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
+    accels[9].key = 'R';
+    accels[9].cmd = IDM_AUTO;
 
     hAccel = CreateAcceleratorTableW(accels, 9);
 
