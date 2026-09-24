@@ -883,18 +883,27 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ctx->icon = NULL;
 
         /*
-         * 进程图标：从 exe 里抽大图标。列表里不放图标是因为绝大多数行是
-         * svchost/System，图标几乎全一样，纯属浪费横向空间；详情窗口正是在
-         * 看这一个具体进程，图标能帮助确认「就是那个程序」。
-         * 抽不到（无路径、权限不足、非 exe）就跳过，不影响其它信息显示。
+         * 进程图标：优先用 exe 自带的大图标，抽不到再退到系统按扩展名给的通用图标。
+         * 只用 ExtractIconEx 会留下大片空白——svchost/lsass/System 这些系统二进制
+         * 本身就没有图标资源，而列表里恰恰大半是它们。
+         * 连完整路径都读不到时（权限不足）拿进程名兜底：SHGFI_USEFILEATTRIBUTES
+         * 只看扩展名，不要求文件真的存在，所以「svchost.exe」「System」也能出图。
+         * 列表里不放图标是因为绝大多数行图标几乎全一样，详情窗口看的才是具体那个进程。
          */
         if (pe->procPath[0]) {
             HICON hIcon = NULL;
             /* iIconIndex=0 取第一个图标（通常是 256/48/32 的最大尺寸）；
              * SS_ICON 会自行缩放到控件大小，不必挑特定尺寸。 */
-            if (ExtractIconExW(pe->procPath, 0, &hIcon, NULL, 1) == 0)
-                hIcon = NULL;
-            ctx->icon = hIcon;
+            if (ExtractIconExW(pe->procPath, 0, &hIcon, NULL, 1) != 0)
+                ctx->icon = hIcon;
+        }
+        if (!ctx->icon) {
+            SHFILEINFOW sfi;
+            const WCHAR *key = pe->procPath[0] ? pe->procPath : pe->procName;
+            ZeroMemory(&sfi, sizeof(sfi));
+            if (SHGetFileInfoW(key, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi),
+                               SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))
+                ctx->icon = sfi.hIcon;
         }
 
         if (ctx->icon) {
