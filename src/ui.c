@@ -230,6 +230,20 @@ static const WCHAR *CellText(const PORT_ENTRY *e, int col)
     }
 }
 
+/*
+ * 状态文字配色，让连接状态一眼可辨：监听绿、已建立蓝、终态灰、中间态橙。
+ * 空状态（UDP 行）返回 CLR_DEFAULT 走系统默认色。
+ */
+static COLORREF StateTextColor(const WCHAR *state)
+{
+    if (!state || !state[0]) return CLR_DEFAULT;
+    if (_wcsicmp(state, L"监听") == 0) return RGB(16, 124, 16);
+    if (_wcsicmp(state, L"已建立") == 0) return RGB(0, 102, 204);
+    if (_wcsicmp(state, L"时间等待") == 0 || _wcsicmp(state, L"已关闭") == 0)
+        return RGB(130, 130, 130);
+    return RGB(200, 110, 0);   /* 关闭等待 / FIN / SYN / 正在关闭 等中间态 */
+}
+
 /* 逐字段匹配，避免为每行拼一个临时大字符串 */
 static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
 {
@@ -298,6 +312,34 @@ static void UpdateStatus(void)
                  (LPARAM)(ProcIsElevated() ? L"管理员" : L"标准用户（部分进程受限）"));
 }
 
+/* 列头排序箭头：当前排序列和方向要一眼可见 */
+static void UpdateSortMark(void)
+{
+    HWND hdr = ListView_GetHeader(g_hList);
+    HDITEM hdi;
+    int i, n;
+
+    if (!hdr) return;
+
+    n = Header_GetItemCount(hdr);
+    for (i = 0; i < n; ++i) {
+        hdi.mask = HDI_FORMAT;
+        if (!Header_GetItem(hdr, i, &hdi)) continue;
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == g_sortCol) hdi.fmt |= (g_sortAsc ? HDF_SORTUP : HDF_SORTDOWN);
+        Header_SetItem(hdr, i, &hdi);
+    }
+}
+
+/* 交替行底色；选中/拖放高亮行保留系统配色不动 */
+static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
+{
+    if (!(cd->nmcd.uItemState & (CDIS_SELECTED | CDIS_DROPHILITED)) &&
+        (cd->nmcd.dwItemSpec & 1)) {
+        cd->clrTextBk = RGB(245, 246, 249);
+    }
+}
+
 /*
  * 列表采用 LVS_OWNERDATA（虚拟列表）：这里只负责重算 g_view、同步行数并重绘，
  * 行文本由 LVN_GETDISPINFO 按需提供。因此刷新不再 DeleteAllItems + 逐行 InsertItem，
@@ -359,6 +401,7 @@ static void ApplyView(void)
     }
 
     UpdateStatus();
+    UpdateSortMark();
 }
 
 static void ReloadAndApply(void)
@@ -1022,6 +1065,28 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         NMHDR *hdr = (NMHDR *)lp;
         if (hdr->idFrom == ID_LIST) {
+            if (hdr->code == NM_CUSTOMDRAW) {
+                NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lp;
+
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+
+                if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    ApplyZebraBand(cd);
+                    return CDRF_NOTIFYITEMDRAW;   /* 继续申请 subitem 通知，给状态列上色 */
+                }
+
+                if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                    ApplyZebraBand(cd);
+                    /* 非状态列必须显式恢复默认色：CDRF_NEWFONT 的颜色会串到后面的子项 */
+                    cd->clrText = CLR_DEFAULT;
+                    if (cd->iSubItem == COL_STATE &&
+                        (size_t)cd->nmcd.dwItemSpec < g_viewCount) {
+                        cd->clrText = StateTextColor(g_view[cd->nmcd.dwItemSpec].state);
+                    }
+                    return CDRF_NEWFONT;
+                }
+                return CDRF_DODEFAULT;
+            }
             if (hdr->code == LVN_GETDISPINFO) {
                 NMLVDISPINFOW *di = (NMLVDISPINFOW *)lp;
                 int item = di->item.iItem;
