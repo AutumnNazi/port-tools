@@ -1150,16 +1150,88 @@ static void LayoutMain(HWND hwnd)
     }
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
-    x = pad;
-    MoveWindow(g_hEdit, x, S(hwnd, 6), S(hwnd, 260), bh, TRUE);
-    x += S(hwnd, 260) + S(hwnd, 6);
-    MoveWindow(g_hBtnRefresh, x, S(hwnd, 6), S(hwnd, 86), bh, TRUE);
-    x += S(hwnd, 86) + S(hwnd, 8);
-    MoveWindow(g_hChkAuto, x, S(hwnd, 9), S(hwnd, 140), bh, TRUE);
-    x += S(hwnd, 140) + S(hwnd, 12);
-    MoveWindow(g_hCbProto, x, S(hwnd, 6), S(hwnd, 104), S(hwnd, 200), TRUE);
-    x += S(hwnd, 104) + S(hwnd, 8);
-    MoveWindow(g_hChkListen, x, S(hwnd, 9), S(hwnd, 110), bh, TRUE);
+    /*
+     * 工具栏按可用宽度自适应。
+     * 之前五个控件固定累加 x，总宽约 750px，而窗口最小可缩到 640px，
+     * 窗口一窄，右侧的协议下拉和「仅监听端口」就被推出可视区看不见了。
+     *
+     * 策略：筛选框是弹性控件吃掉剩余宽度；其余控件按「刷新 → 协议 → 自动刷新 →
+     * 仅监听」的优先级从右往左折叠，宽度不够时先收起信息量最低的那个。
+     * 勾选框收起时同步清掉勾选状态，否则用户看不到勾却仍被过滤。
+     */
+    {
+        int gap = S(hwnd, 8);
+        int wEdit = S(hwnd, 150), wEditMax = S(hwnd, 260);
+        int wRefresh = S(hwnd, 86);
+        int wAuto = S(hwnd, 140);
+        int wProto = S(hwnd, 104);
+        int wListen = S(hwnd, 110);
+        int fixedW, avail;
+
+        /* 先按「全部显示」算一遍，固定部分含筛选框最小宽与各控件间距 */
+        fixedW = wEdit + gap + wRefresh + gap + wAuto + gap + wProto + gap + wListen;
+        avail = w - pad * 2;
+
+        /* 折叠优先级：仅监听 > 自动刷新 > 协议 > 筛选框收缩 */
+        if (avail < fixedW) fixedW -= wListen;
+        if (avail < fixedW) fixedW -= wAuto;
+        if (avail < fixedW) fixedW -= wProto;
+
+        /* 筛选框弹性：先吃 min，剩余的按上限截断 */
+        wEdit = avail - (fixedW - wEdit);
+        if (wEdit > wEditMax) wEdit = wEditMax;
+        if (wEdit < S(hwnd, 110)) wEdit = S(hwnd, 110);
+
+        {
+            /*
+             * 是否放得下，要用「各控件自然宽度之和」判断，不能用收缩后的 wEdit：
+             * 收缩是放不下时的补救，拿补救后的值再判断会自我印证，
+             * 出现窗口明明够宽却仍把控件藏起来的死循环。
+             */
+            int needListen = wEditMax + gap + wRefresh + gap + wAuto + gap + wProto + gap + wListen;
+            int needAuto   = wEditMax + gap + wRefresh + gap + wAuto + gap + wProto + gap;
+            int needProto  = wEditMax + gap + wRefresh + gap + wAuto + gap;
+
+            BOOL showListen = (avail >= needListen);
+            BOOL showAuto   = (avail >= needAuto);
+            BOOL showProto  = (avail >= needProto);
+
+            x = pad;
+            MoveWindow(g_hEdit, x, S(hwnd, 6), wEdit, bh, TRUE);
+            x += wEdit + gap;
+
+            MoveWindow(g_hBtnRefresh, x, S(hwnd, 6), wRefresh, bh, TRUE);
+            x += wRefresh + gap;
+
+            if (showAuto) {
+                MoveWindow(g_hChkAuto, x, S(hwnd, 9), wAuto, bh, TRUE);
+                ShowWindow(g_hChkAuto, SW_SHOW);
+                /* 窗口从窄拉回宽时要恢复定时器，否则收起一次就再也刷不上了；
+                 * 是否该刷以复选框的勾选状态为准，不在这里强行开或关。 */
+                if (SendMessage(g_hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
+                else
+                    KillTimer(hwnd, ID_TIMER);
+                x += wAuto + gap;
+            } else {
+                ShowWindow(g_hChkAuto, SW_HIDE);
+                KillTimer(hwnd, ID_TIMER);
+            }
+
+            if (showProto) {
+                MoveWindow(g_hCbProto, x, S(hwnd, 6), wProto, S(hwnd, 200), TRUE);
+                x += wProto + gap;
+            } else {
+                ShowWindow(g_hCbProto, SW_HIDE);
+            }
+
+            if (showListen) {
+                MoveWindow(g_hChkListen, x, S(hwnd, 9), wListen, bh, TRUE);
+            } else {
+                ShowWindow(g_hChkListen, SW_HIDE);
+            }
+        }
+    }
 
     MoveWindow(g_hList, 0, S(hwnd, 38), w, h - S(hwnd, 38) - sbH - S(hwnd, 26), TRUE);
     MoveWindow(g_hInfoBar, 0, h - sbH - S(hwnd, 26), w, S(hwnd, 26), TRUE);
