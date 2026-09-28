@@ -21,6 +21,10 @@
 #define ID_EDIT_PORT   1014
 #define ID_EDIT_PID    1015
 #define ID_EDIT_NAME   1016
+#define ID_LBL_PORT    1021
+#define ID_LBL_PID     1022
+#define ID_LBL_NAME    1023
+#define ID_LBL_KEY     1024
 #define ID_BTN_REFRESH 1002
 #define ID_CHK_AUTO    1003
 #define ID_BTN_ADMIN   1004
@@ -108,7 +112,12 @@ static HWND g_hEdit;
 static HWND g_hEditPort;
 static HWND g_hEditPid;
 static HWND g_hEditName;
+static HWND g_hLblPort;
+static HWND g_hLblPid;
+static HWND g_hLblName;
+static HWND g_hLblKey;
 static HWND g_hBtnRefresh;
+static HBRUSH g_hQueryBrush;
 static HWND g_hInfoBar;
 static HWND g_hStatus;
 static HFONT g_hFont;
@@ -791,7 +800,7 @@ static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
 {
     if (!(cd->nmcd.uItemState & (CDIS_SELECTED | CDIS_DROPHILITED)) &&
         (cd->nmcd.dwItemSpec & 1)) {
-        cd->clrTextBk = RGB(245, 246, 249);
+        cd->clrTextBk = RGB(236, 244, 255);
     }
 }
 
@@ -999,10 +1008,31 @@ static const PORT_ENTRY *SelectedEntry(void)
  * 刷新底部详情栏。选中即更新，不用双击就能看到「进程 · PID · 路径」。
  * 路径过长时中间省略，保留开头的盘符和结尾的 exe 名——这两段才是定位用的。
  */
+static void CompactPath(const WCHAR *path, WCHAR *out, size_t cch)
+{
+    size_t n;
+    if (!out || cch == 0) return;
+    out[0] = 0;
+    if (!path) return;
+    n = wcslen(path);
+    if (n < cch) {
+        wcscpy(out, path);
+        return;
+    }
+    if (cch < 8) {
+        wcsncpy(out, path, cch - 1);
+        out[cch - 1] = 0;
+        return;
+    }
+    wcsncpy(out, path, (cch - 4) / 2);
+    wcscat(out, L"...");
+    wcscat(out, path + n - (cch - 4 - (cch - 4) / 2));
+}
+
 static void UpdateInfoBar(void)
 {
     const PORT_ENTRY *e = SelectedEntry();
-    WCHAR text[512];
+    WCHAR text[512], path[220];
 
     if (!g_hInfoBar) return;
 
@@ -1012,10 +1042,11 @@ static void UpdateInfoBar(void)
     }
 
     if (e->procPath[0]) {
+        CompactPath(e->procPath, path, 96);
         _snwprintf(text, 512, L"　%s　PID %u　%s",
                    e->procName[0] ? e->procName : L"(未知进程)",
                    e->pid,
-                   e->procPath);
+                   path);
     } else {
         /* 无路径多是权限不足，明确说出来，免得以为程序没取到 */
         _snwprintf(text, 512,
@@ -1575,7 +1606,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
     {
         RECT rc;
-        int w, h, pad, y, bh, bw, x;
+        int w, h, pad, y, bh, bw;
 
         GetClientRect(hwnd, &rc);
         w = rc.right;
@@ -1599,20 +1630,22 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         y += S(hwnd, 140);
         {
-            int listH = h - y - pad - bh - S(hwnd, 8);
-            if (listH < S(hwnd, 40)) listH = S(hwnd, 40);
-            MoveCtl(hwnd, D_LIST_MOD, pad, y, w - pad * 2, listH);
+            int gap = S(hwnd, 8);
+            int buttonY = h - pad - bh;
+            int listBottom = y + (h - y - pad - bh - S(hwnd, 8));
+            if (w < pad * 2 + bw * 4 + gap * 3) {
+                bw = (w - pad * 2 - gap) / 2;
+                if (bw < S(hwnd, 88)) bw = S(hwnd, 88);
+                buttonY -= bh + gap;
+                listBottom = buttonY - S(hwnd, 8);
+            }
+            if (listBottom < y + S(hwnd, 40)) listBottom = y + S(hwnd, 40);
+            MoveCtl(hwnd, D_LIST_MOD, pad, y, w - pad * 2, listBottom - y);
+            MoveCtl(hwnd, D_BTN_LOC, pad, buttonY, bw, bh);
+            MoveCtl(hwnd, D_BTN_KILL, pad + bw + gap, buttonY, bw, bh);
+            MoveCtl(hwnd, D_BTN_RELOAD, w - pad - bw * 2 - gap, buttonY + (buttonY == h - pad - bh ? 0 : bh + gap), bw, bh);
+            MoveCtl(hwnd, D_BTN_CLOSE, w - pad - bw, buttonY + (buttonY == h - pad - bh ? 0 : bh + gap), bw, bh);
         }
-
-        x = w - pad;
-        x -= bw;
-        MoveCtl(hwnd, D_BTN_CLOSE, x, h - pad - bh, bw, bh);
-        x -= bw + S(hwnd, 8);
-        MoveCtl(hwnd, D_BTN_RELOAD, x, h - pad - bh, bw, bh);
-        x -= bw + S(hwnd, 8);
-        MoveCtl(hwnd, D_BTN_KILL, x, h - pad - bh, bw, bh);
-        x -= bw + S(hwnd, 8);
-        MoveCtl(hwnd, D_BTN_LOC, x, h - pad - bh, bw, bh);
         return 0;
     }
 
@@ -1764,31 +1797,48 @@ static void LayoutMain(HWND hwnd)
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     /*
-     * 工具栏从左到右：本地端口、PID、进程名、综合关键字、刷新。
-     * 前三个条件互为“与”，综合框继续搜索所有字段。
+     * 查询区固定两行：第一行放三个精确字段和刷新，第二行让关键字占满宽度。
+     * 这样窗口缩放时控件位置不跳动，关键字也不会被挤掉。
      */
     {
         int gap = S(hwnd, 8);
+        int labelGap = S(hwnd, 4);
+        int rowGap = S(hwnd, 6);
         int wRefresh = S(hwnd, 86);
-        int wPort = S(hwnd, 78);
-        int wPid = S(hwnd, 72);
-        int wName = S(hwnd, 130);
-        int wEdit = w - pad * 2 - wRefresh - wPort - wPid - wName - gap * 4;
+        int wPortLabel = S(hwnd, 34);
+        int wPidLabel = S(hwnd, 30);
+        int wNameLabel = S(hwnd, 48);
+        int wKeyLabel = S(hwnd, 48);
+        int wPort = S(hwnd, 72);
+        int wPid = S(hwnd, 76);
+        int used = wPortLabel + wPort + wPidLabel + wPid + wNameLabel + wRefresh + gap * 3 + labelGap * 3;
+        int wName = w - pad * 2 - used;
         int x = pad;
+        int y = toolbarY;
+        int toolbarH = bh * 2 + rowGap;
 
-        if (wEdit < S(hwnd, 120)) wEdit = S(hwnd, 120);
-        MoveWindow(g_hEditPort, x, toolbarY, wPort, bh, TRUE);
+        if (wName < S(hwnd, 110)) wName = S(hwnd, 110);
+        MoveWindow(g_hLblPort, x, y, wPortLabel, bh, TRUE);
+        x += wPortLabel + labelGap;
+        MoveWindow(g_hEditPort, x, y, wPort, bh, TRUE);
         x += wPort + gap;
-        MoveWindow(g_hEditPid, x, toolbarY, wPid, bh, TRUE);
+        MoveWindow(g_hLblPid, x, y, wPidLabel, bh, TRUE);
+        x += wPidLabel + labelGap;
+        MoveWindow(g_hEditPid, x, y, wPid, bh, TRUE);
         x += wPid + gap;
-        MoveWindow(g_hEditName, x, toolbarY, wName, bh, TRUE);
-        x += wName + gap;
-        MoveWindow(g_hEdit, x, toolbarY, wEdit, bh, TRUE);
-        x += wEdit + gap;
-        MoveWindow(g_hBtnRefresh, x, toolbarY, wRefresh, bh, TRUE);
-    }
+        MoveWindow(g_hLblName, x, y, wNameLabel, bh, TRUE);
+        x += wNameLabel + labelGap;
+        MoveWindow(g_hEditName, x, y, wName, bh, TRUE);
+        MoveWindow(g_hBtnRefresh, w - pad - wRefresh, y, wRefresh, bh, TRUE);
 
-    MoveWindow(g_hList, 0, S(hwnd, 38), w, h - S(hwnd, 38) - sbH - S(hwnd, 26), TRUE);
+        y += bh + rowGap;
+        x = pad;
+        MoveWindow(g_hLblKey, x, y, wKeyLabel, bh, TRUE);
+        x += wKeyLabel + labelGap;
+        MoveWindow(g_hEdit, x, y, w - pad - x, bh, TRUE);
+        MoveWindow(g_hList, 0, toolbarY + toolbarH + S(hwnd, 6), w,
+                   h - (toolbarY + toolbarH + S(hwnd, 6)) - sbH - S(hwnd, 26), TRUE);
+    }
     MoveWindow(g_hInfoBar, 0, h - sbH - S(hwnd, 26), w, S(hwnd, 26), TRUE);
     LayoutColumns(hwnd);
 
@@ -1808,31 +1858,45 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndMain = hwnd;
         g_hFont = CreateUIFont(GetDpiOf(hwnd));
+        if (!g_hQueryBrush) g_hQueryBrush = CreateSolidBrush(RGB(241, 246, 252));
+
+        g_hLblPort = CreateWindowExW(0, L"Static", L"端口",
+                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PORT, g_hInst, NULL);
+        g_hLblPid = CreateWindowExW(0, L"Static", L"PID",
+                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                    0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PID, g_hInst, NULL);
+        g_hLblName = CreateWindowExW(0, L"Static", L"进程名",
+                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_NAME, g_hInst, NULL);
+        g_hLblKey = CreateWindowExW(0, L"Static", L"关键字",
+                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                    0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_KEY, g_hInst, NULL);
 
         g_hEditPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
                                       g_hInst, NULL);
-        SendMessage(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)L"端口");
+        SendMessage(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)L"80");
 
         g_hEditPid = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
                                      g_hInst, NULL);
-        SendMessage(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)L"PID");
+        SendMessage(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)L"1234");
 
         g_hEditName = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
                                       g_hInst, NULL);
-        SendMessage(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)L"进程名");
+        SendMessage(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)L"nginx.exe");
 
         g_hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_FILTER,
                                   g_hInst, NULL);
         SendMessage(g_hEdit, EM_SETCUEBANNER, TRUE,
-                    (LPARAM)L"关键字：地址 / 路径 / 状态…");
+                    (LPARAM)L"地址、路径或状态");
 
         g_hBtnRefresh = CreateWindowExW(0, L"Button", L"刷新 (F5)",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -1852,7 +1916,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowTheme(g_hList, L"Explorer", NULL);
         ListView_SetExtendedListViewStyle(g_hList,
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
-                                          LVS_EX_LABELTIP);
+                                          LVS_EX_LABELTIP | LVS_EX_GRIDLINES);
+        ListView_SetBkColor(g_hList, RGB(250, 252, 255));
+        ListView_SetTextBkColor(g_hList, RGB(250, 252, 255));
         SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
 
         ZeroMemory(&col, sizeof(col));
@@ -1898,9 +1964,33 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * 勾选框是 BS_OWNERDRAW，WM_PAINT 根本不走这里，所以不需要 WM_CTLCOLORBTN。
      */
     case WM_CTLCOLORSTATIC:
-        SetTextColor((HDC)wp, RGB(0, 0, 0));
+        if ((HWND)lp == g_hLblPort || (HWND)lp == g_hLblPid ||
+            (HWND)lp == g_hLblName || (HWND)lp == g_hLblKey) {
+            SetTextColor((HDC)wp, RGB(47, 84, 150));
+            SetBkColor((HDC)wp, RGB(241, 246, 252));
+            return (LRESULT)g_hQueryBrush;
+        }
+        SetTextColor((HDC)wp, RGB(31, 41, 55));
         SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, RGB(17, 24, 39));
+        SetBkColor((HDC)wp, RGB(255, 255, 255));
+        return (LRESULT)GetStockObject(WHITE_BRUSH);
+
+    case WM_ERASEBKGND:
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        rc.bottom = S(hwnd, 72);
+        FillRect((HDC)wp, &rc, g_hQueryBrush);
+        rc.top = rc.bottom;
+        GetClientRect(hwnd, &rc);
+        rc.top = S(hwnd, 72);
+        FillRect((HDC)wp, &rc, GetSysColorBrush(COLOR_WINDOW));
+        return 1;
+    }
 
     case WM_DPICHANGED:
     {
@@ -2219,6 +2309,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_all = NULL;
         g_view = NULL;
         if (g_hFont) DeleteObject(g_hFont);
+        if (g_hQueryBrush) { DeleteObject(g_hQueryBrush); g_hQueryBrush = NULL; }
         PostQuitMessage(0);
         return 0;
     }
