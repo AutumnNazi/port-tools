@@ -18,6 +18,9 @@
 #define DETAIL_CLASS L"PortViewDetailWindow"
 
 #define ID_EDIT_FILTER 1001
+#define ID_EDIT_PORT   1014
+#define ID_EDIT_PID    1015
+#define ID_EDIT_NAME   1016
 #define ID_BTN_REFRESH 1002
 #define ID_CHK_AUTO    1003
 #define ID_BTN_ADMIN   1004
@@ -102,6 +105,9 @@ static HINSTANCE g_hInst;
 static HWND g_hwndMain;
 static HWND g_hList;
 static HWND g_hEdit;
+static HWND g_hEditPort;
+static HWND g_hEditPid;
+static HWND g_hEditName;
 static HWND g_hBtnRefresh;
 static HWND g_hInfoBar;
 static HWND g_hStatus;
@@ -254,6 +260,21 @@ static BOOL ContainsI(const WCHAR *hay, const WCHAR *needle)
 static BOOL EqualsI(const WCHAR *value, const WCHAR *key)
 {
     return value && key && _wcsicmp(value, key) == 0;
+}
+
+static void ReadQuery(HWND edit, WCHAR *buf, size_t cch)
+{
+    if (!buf || cch == 0) return;
+    buf[0] = 0;
+    if (!edit) return;
+    GetWindowTextW(edit, buf, (int)cch);
+    buf[cch - 1] = 0;
+}
+
+static BOOL MatchField(const WCHAR *value, const WCHAR *key)
+{
+    if (!key || !key[0]) return TRUE;
+    return g_exactMatch ? EqualsI(value, key) : ContainsI(value, key);
 }
 
 /* -------------------------------------------------------------- 数据 */
@@ -781,7 +802,7 @@ static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
  */
 static void ApplyView(BOOL keepViewport)
 {
-    WCHAR filter[256];
+    WCHAR filter[256], port[32], pid[32], name[128];
     PORT_ENTRY selEntry;
     size_t i, n = 0, oldCount;
     int sel = -1, top = 0, newSel = -1, haveSel = 0, anchor = 0;
@@ -796,8 +817,10 @@ static void ApplyView(BOOL keepViewport)
         haveSel = 1;
     }
 
-    GetWindowTextW(g_hEdit, filter, 256);
-    filter[255] = 0;
+    ReadQuery(g_hEdit, filter, 256);
+    ReadQuery(g_hEditPort, port, 32);
+    ReadQuery(g_hEditPid, pid, 32);
+    ReadQuery(g_hEditName, name, 128);
 
     free(g_view);
     g_view = NULL;
@@ -817,6 +840,9 @@ static void ApplyView(BOOL keepViewport)
                 if (g_listenOnly && !listening) continue;
                 if (g_hideSystem && IsSystemOwner(e)) continue;
                 if (!MatchProto(e, g_protoFilter)) continue;
+                if (!MatchField(e->portText, port)) continue;
+                if (!MatchField(e->pidText, pid)) continue;
+                if (!MatchField(e->procName, name)) continue;
                 if (!MatchFilter(e, filter)) continue;
 
                 g_view[n++] = *e;
@@ -1738,20 +1764,25 @@ static void LayoutMain(HWND hwnd)
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     /*
-     * 工具栏只剩筛选框与刷新按钮两个控件，高度都由 bh 统一给，
-     * 不会再出现某一类控件比旁边矮一截的情况。
-     * 筛选条件全在顶部菜单栏里，这里不再需要折叠逻辑。
+     * 工具栏从左到右：本地端口、PID、进程名、综合关键字、刷新。
+     * 前三个条件互为“与”，综合框继续搜索所有字段。
      */
     {
         int gap = S(hwnd, 8);
         int wRefresh = S(hwnd, 86);
-        int wEdit = w - pad * 2 - gap - wRefresh;
+        int wPort = S(hwnd, 78);
+        int wPid = S(hwnd, 72);
+        int wName = S(hwnd, 130);
+        int wEdit = w - pad * 2 - wRefresh - wPort - wPid - wName - gap * 4;
         int x = pad;
 
-        /* 筛选框吃剩余宽度，但别窄到看不清占位提示 */
-        if (wEdit > S(hwnd, 520)) wEdit = S(hwnd, 520);
-        if (wEdit < S(hwnd, 110)) wEdit = S(hwnd, 110);
-
+        if (wEdit < S(hwnd, 120)) wEdit = S(hwnd, 120);
+        MoveWindow(g_hEditPort, x, toolbarY, wPort, bh, TRUE);
+        x += wPort + gap;
+        MoveWindow(g_hEditPid, x, toolbarY, wPid, bh, TRUE);
+        x += wPid + gap;
+        MoveWindow(g_hEditName, x, toolbarY, wName, bh, TRUE);
+        x += wName + gap;
         MoveWindow(g_hEdit, x, toolbarY, wEdit, bh, TRUE);
         x += wEdit + gap;
         MoveWindow(g_hBtnRefresh, x, toolbarY, wRefresh, bh, TRUE);
@@ -1778,12 +1809,30 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hwndMain = hwnd;
         g_hFont = CreateUIFont(GetDpiOf(hwnd));
 
+        g_hEditPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
+                                      g_hInst, NULL);
+        SendMessage(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)L"端口");
+
+        g_hEditPid = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
+                                     g_hInst, NULL);
+        SendMessage(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)L"PID");
+
+        g_hEditName = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
+                                      g_hInst, NULL);
+        SendMessage(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)L"进程名");
+
         g_hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_FILTER,
                                   g_hInst, NULL);
         SendMessage(g_hEdit, EM_SETCUEBANNER, TRUE,
-                    (LPARAM)L"按端口 / PID / 进程名 / 路径过滤…");
+                    (LPARAM)L"关键字：地址 / 路径 / 状态…");
 
         g_hBtnRefresh = CreateWindowExW(0, L"Button", L"刷新 (F5)",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -1917,6 +1966,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ApplyView(FALSE);
             return 0;
 
+        case ID_EDIT_PORT:
+        case ID_EDIT_PID:
+        case ID_EDIT_NAME:
         case ID_EDIT_FILTER:
             /*
              * 用 lParam 区分消息来源：控件通知的 lParam 是控件句柄（非 0），
@@ -1967,6 +2019,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_CLEAR:
             /* Esc 一键复位：文本框和结构化条件要一起清，
              * 只清文本框的话菜单里还留着勾，用户会以为没生效 */
+            SetWindowTextW(g_hEditPort, L"");
+            SetWindowTextW(g_hEditPid, L"");
+            SetWindowTextW(g_hEditName, L"");
             SetWindowTextW(g_hEdit, L"");
             g_protoFilter = 0;
             g_listenOnly = 0;
