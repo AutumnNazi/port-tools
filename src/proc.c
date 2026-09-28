@@ -184,7 +184,7 @@ BOOL ProcGetPathAndStart(DWORD pid, WCHAR *buf, DWORD cch, FILETIME *create)
 
 /* ---------------------------------------------------------- 命令行读取 */
 
-BOOL ProcGetCommandLine(DWORD pid, WCHAR *buf, DWORD cch)
+static BOOL ReadCommandLineBytes(DWORD pid, WCHAR **out, DWORD *bytes)
 {
     HANDLE h = NULL;
     PFN_NTQIP pNtQIP = NULL;
@@ -195,8 +195,10 @@ BOOL ProcGetCommandLine(DWORD pid, WCHAR *buf, DWORD cch)
     ULONG_PTR params = 0;
     USHORT cmdLen = 0;
     PVOID cmdPtr = NULL;
+    WCHAR *buf = NULL;
 
-    buf[0] = 0;
+    *out = NULL;
+    *bytes = 0;
     if (pid == 0 || pid == 4) return FALSE;
 
     pNtQIP = (PFN_NTQIP)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
@@ -241,21 +243,53 @@ BOOL ProcGetCommandLine(DWORD pid, WCHAR *buf, DWORD cch)
 
     if (!ReadProcessMemory(h, (PBYTE)params + cmdOff, &cmdLen, sizeof(cmdLen), &rd) ||
         !ReadProcessMemory(h, (PBYTE)params + cmdOff + ptrSize, &cmdPtr, ptrSize, &rd) ||
-        !cmdPtr || cmdLen == 0) {
+        !cmdPtr || cmdLen == 0 || (cmdLen % sizeof(WCHAR)) != 0) {
         CloseHandle(h);
         return FALSE;
     }
 
-    if (cmdLen < (cch - 1) * sizeof(WCHAR)) {
-        if (ReadProcessMemory(h, cmdPtr, buf, cmdLen, &rd) && rd >= sizeof(WCHAR)) {
-            size_t chars = rd / sizeof(WCHAR);
-            buf[chars] = 0;
-            ret = TRUE;
-        }
+    buf = (WCHAR *)malloc((size_t)cmdLen + sizeof(WCHAR));
+    if (buf && ReadProcessMemory(h, cmdPtr, buf, cmdLen, &rd) && rd >= sizeof(WCHAR)) {
+        size_t chars = rd / sizeof(WCHAR);
+        buf[chars] = 0;
+        *out = buf;
+        *bytes = (DWORD)(chars * sizeof(WCHAR));
+        buf = NULL;
+        ret = TRUE;
     }
-
+    free(buf);
     CloseHandle(h);
     return ret;
+}
+
+BOOL ProcGetCommandLineAlloc(DWORD pid, WCHAR **out)
+{
+    DWORD bytes = 0;
+
+    if (!out) return FALSE;
+    *out = NULL;
+    return ReadCommandLineBytes(pid, out, &bytes);
+}
+
+BOOL ProcGetCommandLine(DWORD pid, WCHAR *buf, DWORD cch)
+{
+    WCHAR *text = NULL;
+    DWORD bytes = 0;
+    size_t chars;
+
+    if (!buf || cch == 0) return FALSE;
+    buf[0] = 0;
+    if (!ReadCommandLineBytes(pid, &text, &bytes)) return FALSE;
+
+    chars = bytes / sizeof(WCHAR);
+    if (chars >= cch) {
+        free(text);
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(buf, text, (chars + 1) * sizeof(WCHAR));
+    free(text);
+    return TRUE;
 }
 
 /* -------------------------------------------------------- 模块（DLL） */

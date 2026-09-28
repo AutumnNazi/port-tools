@@ -45,8 +45,17 @@ typedef struct {
 } MODULE_INFO;
 
 /* ---- ports.c ---- */
-/* 返回 1：至少一张表读取成功（count 可以为 0，表示确实没有端口）；返回 0：四张表全部读取失败 */
+/* 四张端口表的读取结果：bit0 TCP4，bit1 TCP6，bit2 UDP4，bit3 UDP6。 */
+#define PORT_TABLE_TCP4 0x01u
+#define PORT_TABLE_TCP6 0x02u
+#define PORT_TABLE_UDP4 0x04u
+#define PORT_TABLE_UDP6 0x08u
+#define PORT_TABLE_ALL  0x0Fu
+
+/* 返回 1：至少一张表读取成功（count 可以为 0，表示确实没有端口）；返回 0：四张表全部读取失败。
+ * tables 可传 NULL；非 NULL 时返回成功读取的端口表掩码。 */
 int  PortsEnumerate(PORT_ENTRY **entries, size_t *count);
+int  PortsEnumerateEx(PORT_ENTRY **entries, size_t *count, unsigned *tables);
 void PortsFree(PORT_ENTRY *entries);
 const WCHAR *PortsStateText(DWORD state);
 
@@ -69,7 +78,9 @@ BOOL ProcGetPath(DWORD pid, WCHAR *buf, DWORD cch);
 /* 一次打开句柄同时取映像路径与创建时间，列举时每个 PID 只付一次 OpenProcess */
 BOOL ProcGetPathAndStart(DWORD pid, WCHAR *buf, DWORD cch, FILETIME *create);
 BOOL ProcGetStartTime(DWORD pid, FILETIME *create);
+/* 调用方释放返回的字符串；读取失败返回 NULL，缓冲区不足返回 FALSE 且不截断。 */
 BOOL ProcGetCommandLine(DWORD pid, WCHAR *buf, DWORD cch);
+BOOL ProcGetCommandLineAlloc(DWORD pid, WCHAR **out);
 int  ProcEnumModules(DWORD pid, MODULE_INFO **list, size_t *count);
 void ProcFreeModules(MODULE_INFO *list);
 /* expectCreate 是选择某一行时记录的进程创建时间（PORT_ENTRY.procCreate）；

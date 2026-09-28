@@ -28,6 +28,8 @@
 #define ID_CHK_LISTEN  1009
 #define ID_INFOBAR     1010    /* 底部选中项详情栏 */
 #define ID_CHK_SYS     1011    /* 隐藏系统关键进程占用的端口 */
+#define ID_FILTER_TIMER 1012   /* 筛选输入防抖 */
+#define ID_KILL_TIMER  1013    /* 结束进程期间的界面心跳 */
 
 #define IDM_OPEN_LOC   2001
 #define IDM_DETAIL     2002
@@ -68,6 +70,11 @@
 
 #define WM_APP_REFRESH (WM_APP + 1)
 #define WM_APP_KILLED  (WM_APP + 2)
+#define WM_APP_PORTS   (WM_APP + 3)
+#define WM_APP_DETAIL  (WM_APP + 4)
+#define WM_APP_KILL    (WM_APP + 5)
+
+#define FILTER_DEBOUNCE_MS 180
 
 enum {
     COL_PROTO = 0, COL_LADDR, COL_LPORT, COL_RADDR,
@@ -106,6 +113,15 @@ static size_t g_viewCount = 0;
 
 /* 上一次 PortsEnumerate 是否一张端口表都没读出来 */
 static int g_enumFailed = 0;
+static unsigned g_tableMask = PORT_TABLE_ALL;
+static BOOL g_portsLoading = FALSE;
+static SYSTEMTIME g_lastSuccessTime;
+static BOOL g_haveSuccessTime = FALSE;
+static unsigned g_portsGeneration = 0;
+static BOOL g_portsPending = FALSE;
+static int g_colUserSized[COL_COUNT];
+static volatile LONG g_portsBusy = 0;
+static volatile LONG g_killBusy = 0;
 
 static int g_sortCol = COL_LPORT;
 static int g_sortAsc = 1;
@@ -154,7 +170,7 @@ static HFONT CreateUIFont(UINT dpi)
 {
     NONCLIENTMETRICSW ncm;
     LOGFONTW lf;
-    typedef BOOL (WINAPI *PFN_SPID)(UINT, UINT, PVOID, UINT);
+    typedef BOOL (WINAPI *PFN_SPID)(UINT, UINT, PVOID, UINT, UINT);
     PFN_SPID pSpiDpi;
     BOOL ok = FALSE;
 
@@ -164,7 +180,7 @@ static HFONT CreateUIFont(UINT dpi)
     pSpiDpi = (PFN_SPID)GetProcAddress(GetModuleHandleW(L"user32.dll"),
                                        "SystemParametersInfoForDpi");
     if (pSpiDpi) {
-        ok = pSpiDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+        ok = pSpiDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
     }
 
     if (!ok) {
@@ -353,6 +369,132 @@ static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
            ContainsI(e->procPath, key);
 }
 
+static int ParseIpv4(const WCHAR *text, unsigned char out[4])
+{
+    unsigned values[4];
+    const WCHAR *p = text;
+    int i;
+
+    for (i = 0; i < 4; ++i) {
+        unsigned value = 0;
+        int digits = 0;
+        if (*p < L'0' || *p > L'9') return 0;
+        while (*p >= L'0' && *p <= L'9') {
+            value = value * 10u + (unsigned)(*p - L'0');
+            if (value > 255u || ++digits > 3) return 0;
+            ++p;
+        }
+        if (i < 3) {
+            if (*p != L'.') return 0;
+            ++p;
+        }
+        values[i] = value;
+    }
+    if (*p) return 0;
+    for (i = 0; i < 4; ++i) out[i] = (unsigned char)values[i];
+    return 1;
+}
+
+static int ParseIpv6(const WCHAR *text, unsigned char out[16], DWORD *scope)
+{
+    unsigned short groups[8] = {0};
+    const WCHAR *p = text;
+    int count = 0, compress = -1, i;
+    unsigned long parsedScope;
+
+    *scope = 0;
+    if (*p == L':') {
+        if (p[1] != L':') return 0;
+        compress = 0;
+        p += 2;
+    }
+
+    while (*p && *p != L'%') {
+        const WCHAR *hex = p;
+        unsigned value = 0;
+        int digits = 0;
+
+        if (*p == L':') {
+            if (compress >= 0) return 0;
+            compress = count;
+            ++p;
+            continue;
+        }
+        while ((*p >= L'0' && *p <= L'9') ||
+               (*p >= L'a' && *p <= L'f') ||
+               (*p >= L'A' && *p <= L'F')) {
+            unsigned digit = (*p <= L'9') ? (unsigned)(*p - L'0')
+                           : (*p <= L'F') ? (unsigned)(*p - L'A' + 10)
+                                          : (unsigned)(*p - L'a' + 10);
+            value = (value << 4) | digit;
+            if (value > 0xFFFFu || ++digits > 4) return 0;
+            ++p;
+        }
+        if (digits == 0 || count >= 8) return 0;
+        if (*p == L'.' && count <= 6) {
+            unsigned char v4[4];
+            if (!ParseIpv4(hex, v4)) return 0;
+            groups[count++] = (unsigned short)((v4[0] << 8) | v4[1]);
+            groups[count++] = (unsigned short)((v4[2] << 8) | v4[3]);
+            p = hex + wcslen(hex);
+            while (*p && *p != L'%') ++p;
+            break;
+        }
+        groups[count++] = (unsigned short)value;
+        if (*p == L':') ++p;
+        else if (*p && *p != L'%') return 0;
+    }
+
+    if (*p == L'%') {
+        ++p;
+        if (!*p) return 0;
+        parsedScope = wcstoul(p, (WCHAR **)&p, 10);
+        if (*p || parsedScope > 0xFFFFFFFFul) return 0;
+        *scope = (DWORD)parsedScope;
+    }
+    if (compress < 0) {
+        if (count != 8) return 0;
+    } else {
+        int tail = count - compress;
+        int zeros = 8 - count;
+        if (zeros <= 0 || tail < 0) return 0;
+        for (i = 7; tail > 0; --i, --tail) groups[i] = groups[compress + tail - 1];
+        for (i = 0; i < zeros; ++i) groups[compress + i] = 0;
+    }
+    for (i = 0; i < 8; ++i) {
+        out[i * 2] = (unsigned char)(groups[i] >> 8);
+        out[i * 2 + 1] = (unsigned char)groups[i];
+    }
+    return 1;
+}
+
+static int CmpAddress(const WCHAR *a, const WCHAR *b)
+{
+    unsigned char aa[16], bb[16];
+    DWORD scopeA = 0, scopeB = 0;
+    int kindA = 0, kindB = 0, i;
+
+    if (!a[0] && !b[0]) return 0;
+    if (!a[0]) return -1;
+    if (!b[0]) return 1;
+    if (ParseIpv4(a, aa)) kindA = 1;
+    else if (ParseIpv6(a, aa, &scopeA)) kindA = 2;
+    if (ParseIpv4(b, bb)) kindB = 1;
+    else if (ParseIpv6(b, bb, &scopeB)) kindB = 2;
+    if (kindA != kindB) {
+        if (!kindA) return 1;
+        if (!kindB) return -1;
+        return kindA - kindB;
+    }
+    if (!kindA) return _wcsicmp(a, b);
+    for (i = 0; i < (kindA == 1 ? 4 : 16); ++i) {
+        if (aa[i] != bb[i]) return (int)aa[i] - (int)bb[i];
+    }
+    if (scopeA < scopeB) return -1;
+    if (scopeA > scopeB) return 1;
+    return 0;
+}
+
 static int CmpEntry(const void *pa, const void *pb)
 {
     const PORT_ENTRY *a = (const PORT_ENTRY *)pa;
@@ -361,9 +503,9 @@ static int CmpEntry(const void *pa, const void *pb)
 
     switch (g_sortCol) {
     case COL_PROTO: r = _wcsicmp(a->proto, b->proto); break;
-    case COL_LADDR: r = _wcsicmp(a->localAddr, b->localAddr); break;
+    case COL_LADDR: r = CmpAddress(a->localAddr, b->localAddr); break;
     case COL_LPORT: r = (int)a->localPort - (int)b->localPort; break;
-    case COL_RADDR: r = _wcsicmp(a->remoteAddr, b->remoteAddr); break;
+    case COL_RADDR: r = CmpAddress(a->remoteAddr, b->remoteAddr); break;
     case COL_RPORT: r = (int)a->remotePort - (int)b->remotePort; break;
     case COL_STATE: r = _wcsicmp(a->state, b->state); break;
     case COL_PID:   r = (int)a->pid - (int)b->pid; break;
@@ -373,7 +515,9 @@ static int CmpEntry(const void *pa, const void *pb)
     }
 
     if (r == 0) r = (int)a->localPort - (int)b->localPort;
+    if (r == 0) r = (int)a->remotePort - (int)b->remotePort;
     if (r == 0) r = _wcsicmp(a->proto, b->proto);
+    if (r == 0) r = (int)a->pid - (int)b->pid;
     return g_sortAsc ? r : -r;
 }
 
@@ -441,7 +585,8 @@ static void UpdateStatus(void)
         if (_wcsicmp(g_all[i].state, L"监听") == 0) listen++;
     }
 
-    GetLocalTime(&st);
+    if (g_haveSuccessTime) st = g_lastSuccessTime;
+    else ZeroMemory(&st, sizeof(st));
 
     /*
      * 生效中的筛选条件直接拼进状态栏。勾选项都搬进菜单后，不打开菜单就看不见
@@ -459,17 +604,22 @@ static void UpdateStatus(void)
         if (g_autoOn && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"自动刷新 · ");
     }
 
-    if (g_enumFailed) {
+    if (g_portsLoading && !g_haveSuccessTime) {
+        _snwprintf(text, 320, L"正在读取端口表… · %s", cond);
+    } else if (g_enumFailed) {
         _snwprintf(text, 320,
                    L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
                    st.wHour, st.wMinute, st.wSecond);
     } else {
-        _snwprintf(text, 320, L"共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
-                   (unsigned)g_allCount, (unsigned)listen, (unsigned)g_viewCount,
-                   cond, st.wHour, st.wMinute, st.wSecond);
+        const WCHAR *partial = (g_tableMask == PORT_TABLE_ALL) ? L"" : L"部分结果 · ";
+        const WCHAR *loading = g_portsLoading ? L"正在刷新 · " : L"";
+        _snwprintf(text, 320, L"%s%s共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
+                   loading, partial, (unsigned)g_allCount, (unsigned)listen,
+                   (unsigned)g_viewCount, cond, st.wHour, st.wMinute, st.wSecond);
     }
     text[319] = 0;
 
+    if (g_killBusy) wcscpy(text, L"正在结束进程…");
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)text);
 
     /*
@@ -493,6 +643,8 @@ static const WCHAR *EmptyHintText(void)
 {
     /* 区分两种「空」：本来就没数据，与有数据但被筛选条件滤光。
      * 后者必须提示去清条件，否则用户会以为程序坏了。 */
+    if (g_portsLoading && g_allCount == 0) return L"正在读取端口表…";
+    if (g_enumFailed && g_allCount == 0) return L"读取端口表失败\n显示的是上一次成功读取的结果";
     if (g_allCount == 0) return L"当前没有检测到端口占用";
     if (g_hideSystem)
         return L"没有符合当前条件的端口\n当前已隐藏系统关键进程占用的端口\n试试取消「隐藏系统端口」";
@@ -602,16 +754,17 @@ static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
  * 行文本由 LVN_GETDISPINFO 按需提供。因此刷新不再 DeleteAllItems + 逐行 InsertItem，
  * 也不会为每行做 8 次 SetItemText。
  */
-static void ApplyView(void)
+static void ApplyView(BOOL keepViewport)
 {
     WCHAR filter[256];
     PORT_ENTRY selEntry;
     size_t i, n = 0, oldCount;
-    int sel = -1, top = 0, newSel = -1, haveSel = 0;
+    int sel = -1, top = 0, newSel = -1, haveSel = 0, anchor = 0;
 
     /* 记住当前选中项与滚动位置 */
     oldCount = g_viewCount;
     top = ListView_GetTopIndex(g_hList);
+    if (top >= 0 && (size_t)top < g_viewCount) anchor = (int)g_view[top].localPort;
     sel = ListView_GetNextItem(g_hList, -1, LVNI_SELECTED);
     if (sel >= 0 && (size_t)sel < g_viewCount) {
         selEntry = g_view[sel];   /* 结构体拷贝，无需格式化成字符串 */
@@ -663,8 +816,22 @@ static void ApplyView(void)
     if (newSel >= 0) {
         ListView_SetItemState(g_hList, newSel, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(g_hList, newSel, FALSE);
-    } else if (top > 0 && g_viewCount) {
+        if (!keepViewport) ListView_EnsureVisible(g_hList, newSel, FALSE);
+    } else if (haveSel) {
+        ListView_SetItemState(g_hList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+
+    if (keepViewport && g_viewCount) {
+        int restore = top;
+        if (anchor) {
+            for (i = 0; i < g_viewCount; ++i) {
+                if ((int)g_view[i].localPort == anchor) { restore = (int)i; break; }
+            }
+        }
+        if (restore < 0) restore = 0;
+        if ((size_t)restore >= g_viewCount) restore = (int)g_viewCount - 1;
+        ListView_EnsureVisible(g_hList, restore, TRUE);
+    } else if (newSel < 0 && top > 0 && g_viewCount) {
         if ((size_t)top >= g_viewCount) top = (int)g_viewCount - 1;
         ListView_EnsureVisible(g_hList, top, TRUE);
     } else if (g_viewCount && !haveSel && !g_hadInitialSelect) {
@@ -683,23 +850,91 @@ static void ApplyView(void)
     UpdateSortMark();
 }
 
-static void ReloadAndApply(void)
-{
-    PORT_ENTRY *list = NULL;
-    size_t count = 0;
+typedef struct {
+    unsigned generation;
+    PORT_ENTRY *entries;
+    size_t count;
+    unsigned tables;
+    int ok;
+} PORTS_RESULT;
 
-    if (PortsEnumerate(&list, &count)) {
-        free(g_all);
-        g_all = list;
-        g_allCount = count;
-        g_enumFailed = 0;
-    } else {
-        /* 读取失败时保留上一次的数据并标注出来，不能把界面清成空列表还显示成功 */
-        PortsFree(list);
-        g_enumFailed = 1;
+static DWORD WINAPI PortsWorker(LPVOID param)
+{
+    PORTS_RESULT *result = (PORTS_RESULT *)param;
+
+    result->ok = PortsEnumerateEx(&result->entries, &result->count, &result->tables);
+    if (!PostMessageW(g_hwndMain, WM_APP_PORTS, 0, (LPARAM)result)) {
+        PortsFree(result->entries);
+        free(result);
+    }
+    InterlockedExchange(&g_portsBusy, 0);
+    return 0;
+}
+
+static void RequestPorts(void)
+{
+    PORTS_RESULT *result;
+    HANDLE thread;
+
+    if (InterlockedCompareExchange(&g_portsBusy, 1, 0) != 0) {
+        g_portsPending = TRUE;
+        return;
     }
 
-    ApplyView();
+    result = (PORTS_RESULT *)calloc(1, sizeof(*result));
+    if (!result) {
+        InterlockedExchange(&g_portsBusy, 0);
+        g_enumFailed = 1;
+        UpdateStatus();
+        return;
+    }
+    result->generation = ++g_portsGeneration;
+    g_portsLoading = TRUE;
+    UpdateStatus();
+
+    thread = CreateThread(NULL, 0, PortsWorker, result, 0, NULL);
+    if (!thread) {
+        free(result);
+        InterlockedExchange(&g_portsBusy, 0);
+        g_portsLoading = FALSE;
+        g_enumFailed = 1;
+        UpdateStatus();
+        return;
+    }
+    CloseHandle(thread);
+}
+
+static void ApplyPortsResult(PORTS_RESULT *result)
+{
+    if (!result) return;
+    if (result->generation == g_portsGeneration) {
+        g_portsLoading = FALSE;
+        if (result->ok) {
+            free(g_all);
+            g_all = result->entries;
+            g_allCount = result->count;
+            g_tableMask = result->tables;
+            g_enumFailed = 0;
+            GetLocalTime(&g_lastSuccessTime);
+            g_haveSuccessTime = TRUE;
+            result->entries = NULL;
+        } else {
+            g_enumFailed = 1;
+        }
+        ApplyView(TRUE);
+    }
+    PortsFree(result->entries);
+    free(result);
+
+    if (g_portsPending && IsWindow(g_hwndMain)) {
+        g_portsPending = FALSE;
+        RequestPorts();
+    }
+}
+
+static void ReloadAndApply(void)
+{
+    RequestPorts();
 }
 
 static const PORT_ENTRY *SelectedEntry(void)
@@ -764,35 +999,129 @@ static BOOL ConfirmElevate(HWND hwnd)
     return FALSE;
 }
 
-/* 点在状态栏右端那一格（权限提示）上？命中则返回 TRUE。 */
-static BOOL HitAdminCell(HWND hwnd)
+typedef struct {
+    HWND hwnd;
+    PORT_ENTRY entry;
+    BOOL tree;
+    PROC_KILL_RESULT result;
+    DWORD error;
+} KILL_REQUEST;
+
+static DWORD WINAPI KillWorker(LPVOID param)
 {
-    POINT cursor, origin;
-    RECT rc;
-    int rightBound;
+    KILL_REQUEST *request = (KILL_REQUEST *)param;
 
-    if (!g_hStatus || ProcIsElevated()) return FALSE;
+    request->result = request->tree
+        ? ProcTerminateTree(request->entry.pid, &request->entry.procCreate)
+        : ProcTerminate(request->entry.pid, &request->entry.procCreate);
+    request->error = GetLastError();
+    if (!PostMessageW(request->hwnd, WM_APP_KILL, 0, (LPARAM)request) &&
+        !PostMessageW(g_hwndMain, WM_APP_KILL, 0, (LPARAM)request)) {
+        free(request);
+    }
+    InterlockedExchange(&g_killBusy, 0);
+    return 0;
+}
 
-    if (!GetCursorPos(&cursor)) return FALSE;
-    if (!GetWindowRect(g_hStatus, &rc)) return FALSE;
+static void StartKill(HWND hwnd, const PORT_ENTRY *target, BOOL tree)
+{
+    KILL_REQUEST *request;
+    HANDLE thread;
 
-    /* 状态栏右下角转成主窗口客户区坐标 */
-    origin.x = rc.right;
-    origin.y = rc.bottom;
-    ScreenToClient(hwnd, &origin);
+    if (InterlockedCompareExchange(&g_killBusy, 1, 0) != 0) {
+        MessageBoxW(hwnd, L"上一次结束操作还在进行，请稍候。", L"请稍候",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    request = (KILL_REQUEST *)calloc(1, sizeof(*request));
+    if (!request) {
+        InterlockedExchange(&g_killBusy, 0);
+        MessageBoxW(hwnd, L"内存不足，无法开始结束操作。", L"失败", MB_OK | MB_ICONERROR);
+        return;
+    }
+    request->hwnd = hwnd;
+    request->entry = *target;
+    request->tree = tree;
+    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)L"正在结束进程…");
+    SetTimer(g_hwndMain, ID_KILL_TIMER, 250, NULL);
 
-    /* 右端那一格宽度取 220，与 LayoutMain 里 parts[0] 的划分一致 */
-    rightBound = origin.x - S(hwnd, 220);
+    thread = CreateThread(NULL, 0, KillWorker, request, 0, NULL);
+    if (!thread) {
+        KillTimer(g_hwndMain, ID_KILL_TIMER);
+        free(request);
+        InterlockedExchange(&g_killBusy, 0);
+        MessageBoxW(hwnd, L"无法开始结束操作。", L"失败", MB_OK | MB_ICONERROR);
+        UpdateStatus();
+    } else {
+        CloseHandle(thread);
+    }
+}
 
-    return cursor.x >= rightBound && cursor.x <= origin.x
-        && cursor.y >= origin.y - S(hwnd, 24) && cursor.y <= origin.y;
+static void DiscardQueuedWork(HWND hwnd)
+{
+    MSG msg;
+
+    g_portsGeneration++;
+    g_portsPending = FALSE;
+    while (PeekMessageW(&msg, hwnd, WM_APP_PORTS, WM_APP_KILL, PM_REMOVE)) {
+        if (msg.message == WM_APP_PORTS) {
+            PORTS_RESULT *result = (PORTS_RESULT *)msg.lParam;
+            if (result) {
+                PortsFree(result->entries);
+                free(result);
+            }
+        } else if (msg.message == WM_APP_KILL) {
+            free((KILL_REQUEST *)msg.lParam);
+        }
+    }
+}
+
+static void FinishKill(KILL_REQUEST *request)
+{
+    WCHAR msg[512];
+
+    KillTimer(g_hwndMain, ID_KILL_TIMER);
+    if (!request) return;
+    if (IsWindow(request->hwnd)) {
+        switch (request->result) {
+        case PROC_KILL_OK:
+            break;
+        case PROC_KILL_REUSED:
+            MessageBoxW(request->hwnd,
+                        L"该 PID 已不是你选择的那个进程（原进程期间已退出，PID 被系统重新分配）。\n"
+                        L"为避免误杀无关进程，本次没有执行结束操作。\n请确认列表上的进程后再试。",
+                        L"已中止", MB_OK | MB_ICONWARNING);
+            break;
+        case PROC_KILL_PARTIAL:
+            MessageBoxW(request->hwnd,
+                        L"进程树已处理，但有部分成员没有结束：它们可能已经退出、PID 已被复用，\n"
+                        L"或权限不足——读不到创建时间的进程无法确认它是否属于这棵树，已跳过。",
+                        L"部分完成", MB_OK | MB_ICONWARNING);
+            break;
+        case PROC_KILL_SELF:
+            MessageBoxW(request->hwnd,
+                        L"要结束的范围里包含本工具自己（你选中的就是它，或者它在那棵进程树里，\n"
+                        L"例如本工具是从你要结束的那个命令行启动的）。\n"
+                        L"为避免操作进行到一半工具自己消失，本次没有执行。",
+                        L"已中止", MB_OK | MB_ICONWARNING);
+            break;
+        case PROC_KILL_FAILED:
+        default:
+            _snwprintf(msg, 512, L"结束失败（错误 %u）。\n如果是系统或其他用户的进程，请以管理员身份运行本工具。",
+                       request->error);
+            MessageBoxW(request->hwnd, msg, L"失败", MB_OK | MB_ICONERROR);
+            break;
+        }
+    }
+    free(request);
+    if (IsWindow(g_hwndMain)) PostMessageW(g_hwndMain, WM_APP_REFRESH, 0, 0);
+    else UpdateStatus();
 }
 
 static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
 {
     WCHAR msg[512], title[128];
     PORT_ENTRY target;
-    PROC_KILL_RESULT r;
 
     if (!e) return;
 
@@ -823,48 +1152,8 @@ static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
 
     if (MessageBoxW(hwnd, msg, title, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
 
-    /* 带上选择时的进程创建时间：列表可能落后数秒，期间同一 PID 可能已经换成别的进程 */
-    r = tree ? ProcTerminateTree(target.pid, &target.procCreate)
-             : ProcTerminate(target.pid, &target.procCreate);
-
-    switch (r) {
-    case PROC_KILL_OK:
-        break;
-
-    case PROC_KILL_REUSED:
-        MessageBoxW(hwnd,
-                    L"该 PID 已不是你选择的那个进程（原进程期间已退出，PID 被系统重新分配）。\n"
-                    L"为避免误杀无关进程，本次没有执行结束操作。\n请确认列表上的进程后再试。",
-                    L"已中止", MB_OK | MB_ICONWARNING);
-        break;
-
-    case PROC_KILL_PARTIAL:
-        MessageBoxW(hwnd,
-                    L"进程树已处理，但有部分成员没有结束：它们可能已经退出、PID 已被复用，\n"
-                    L"或权限不足——读不到创建时间的进程无法确认它是否属于这棵树，已跳过。",
-                    L"部分完成", MB_OK | MB_ICONWARNING);
-        break;
-
-    case PROC_KILL_SELF:
-        MessageBoxW(hwnd,
-                    L"要结束的范围里包含本工具自己（你选中的就是它，或者它在那棵进程树里，\n"
-                    L"例如本工具是从你要结束的那个命令行启动的）。\n"
-                    L"为避免操作进行到一半工具自己消失，本次没有执行。",
-                    L"已中止", MB_OK | MB_ICONWARNING);
-        break;
-
-    case PROC_KILL_FAILED:
-    default:
-    {
-        DWORD err = GetLastError();
-        _snwprintf(msg, 512, L"结束失败（错误 %u）。\n如果是系统或其他用户的进程，请以管理员身份运行本工具。",
-                   err);
-        MessageBoxW(hwnd, msg, L"失败", MB_OK | MB_ICONERROR);
-        break;
-    }
-    }
-
-    PostMessage(g_hwndMain, WM_APP_REFRESH, 0, 0);
+    /* 创建时间随请求带走：确认框期间列表可能刷新，不能结束后再读界面上的旧指针。 */
+    StartKill(hwnd, &target, tree);
 }
 
 static void ShowContextMenu(HWND hwnd, int item, int x, int y)
@@ -911,7 +1200,20 @@ typedef struct {
     PORT_ENTRY entry;
     HFONT hFont;
     HICON icon;      /* 进程图标，WM_DESTROY 时 DestroyIcon */
+    WCHAR *commandLine;
+    unsigned generation;
+    BOOL loading;
+    BOOL alive;
 } DETAIL_CTX;
+
+typedef struct {
+    HWND hwnd;
+    unsigned generation;
+    PORT_ENTRY entry;
+    WCHAR *commandLine;
+    int commandOk;
+    int identityOk;
+} DETAIL_RESULT;
 
 static void SetCtlFont(HWND ctl, HFONT font)
 {
@@ -968,6 +1270,137 @@ static void FillModules(HWND hList, DWORD pid)
     ProcFreeModules(mods);
 }
 
+static HICON LoadProcessIcon(const PORT_ENTRY *entry)
+{
+    HICON icon = NULL;
+
+    if (entry->procPath[0] && ExtractIconExW(entry->procPath, 0, &icon, NULL, 1) > 0 && icon)
+        return icon;
+    if (icon) DestroyIcon(icon);
+    {
+        SHFILEINFOW info;
+        const WCHAR *key = entry->procPath[0] ? entry->procPath : entry->procName;
+        ZeroMemory(&info, sizeof(info));
+        if (key[0] && SHGetFileInfoW(key, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
+                                     SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))
+            return info.hIcon;
+    }
+    return NULL;
+}
+
+static void ApplyProcessIcon(HWND hwnd, DETAIL_CTX *ctx, HICON icon)
+{
+    HWND control = GetDlgItem(hwnd, D_ICO);
+    HICON old = ctx->icon;
+
+    ctx->icon = icon;
+    if (icon) {
+        if (!control) {
+            control = CreateWindowExW(0, L"Static", L"",
+                                      WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE,
+                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ICO, g_hInst, NULL);
+        }
+        if (control) SendMessageW(control, STM_SETICON, (WPARAM)icon, 0);
+        else { DestroyIcon(icon); ctx->icon = NULL; }
+    } else if (control) {
+        DestroyWindow(control);
+    }
+    if (old && old != ctx->icon) DestroyIcon(old);
+    SendMessageW(hwnd, WM_SIZE, 0, 0);
+}
+
+static void FreeDetailResult(DETAIL_RESULT *result)
+{
+    if (!result) return;
+    free(result->commandLine);
+    free(result);
+}
+
+static void DiscardQueuedDetail(HWND hwnd)
+{
+    MSG msg;
+
+    while (PeekMessageW(&msg, hwnd, WM_APP_DETAIL, WM_APP_DETAIL, PM_REMOVE))
+        FreeDetailResult((DETAIL_RESULT *)msg.lParam);
+}
+
+static DWORD WINAPI DetailWorker(LPVOID param)
+{
+    DETAIL_RESULT *result = (DETAIL_RESULT *)param;
+    FILETIME current;
+
+    ZeroMemory(&current, sizeof(current));
+    result->identityOk = result->entry.procCreateValid &&
+                         ProcGetStartTime(result->entry.pid, &current) &&
+                         current.dwLowDateTime == result->entry.procCreate.dwLowDateTime &&
+                         current.dwHighDateTime == result->entry.procCreate.dwHighDateTime;
+    if (result->identityOk) {
+        ProcGetPath(result->entry.pid, result->entry.procPath, MAX_PATH);
+        result->commandOk = ProcGetCommandLineAlloc(result->entry.pid, &result->commandLine);
+    }
+    if (!PostMessageW(result->hwnd, WM_APP_DETAIL, 0, (LPARAM)result)) FreeDetailResult(result);
+    return 0;
+}
+
+static void RequestDetail(HWND hwnd, DETAIL_CTX *ctx)
+{
+    DETAIL_RESULT *result;
+    HANDLE thread;
+
+    if (!ctx || ctx->loading) return;
+    result = (DETAIL_RESULT *)calloc(1, sizeof(*result));
+    if (!result) return;
+    result->hwnd = hwnd;
+    result->generation = ++ctx->generation;
+    result->entry = ctx->entry;
+    ctx->loading = TRUE;
+    SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), L"正在读取…");
+
+    thread = CreateThread(NULL, 0, DetailWorker, result, 0, NULL);
+    if (!thread) {
+        ctx->loading = FALSE;
+        FreeDetailResult(result);
+        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), L"（不可用）");
+        return;
+    }
+    CloseHandle(thread);
+}
+
+static void ApplyDetailResult(HWND hwnd, DETAIL_CTX *ctx, DETAIL_RESULT *result)
+{
+    WCHAR title[512];
+    HICON icon;
+
+    if (!ctx || !result) { FreeDetailResult(result); return; }
+    ctx->loading = FALSE;
+    if (!ctx->alive || !IsWindow(hwnd) || result->generation != ctx->generation) {
+        FreeDetailResult(result);
+        return;
+    }
+    if (!result->identityOk) {
+        SetWindowTextW(GetDlgItem(hwnd, D_ED_PATH), L"");
+        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD),
+                       L"（原进程已退出或 PID 已被其它进程复用，未刷新它的数据）");
+        ListView_DeleteAllItems(GetDlgItem(hwnd, D_LIST_MOD));
+        FreeDetailResult(result);
+        return;
+    }
+
+    ctx->entry = result->entry;
+    free(ctx->commandLine);
+    ctx->commandLine = result->commandLine;
+    result->commandLine = NULL;
+    _snwprintf(title, 512, L"%s  (PID %u)", ctx->entry.procName, ctx->entry.pid);
+    SetWindowTextW(GetDlgItem(hwnd, D_ST_NAME), title);
+    SetWindowTextW(GetDlgItem(hwnd, D_ED_PATH), ctx->entry.procPath);
+    SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD),
+                   result->commandOk && ctx->commandLine ? ctx->commandLine : L"（不可用）");
+    icon = LoadProcessIcon(&ctx->entry);
+    ApplyProcessIcon(hwnd, ctx, icon);
+    FillModules(GetDlgItem(hwnd, D_LIST_MOD), ctx->entry.pid);
+    FreeDetailResult(result);
+}
+
 static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     DETAIL_CTX *ctx = (DETAIL_CTX *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -992,44 +1425,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* 先挂到窗口上：即便下面某步失败导致创建中止，WM_DESTROY 也能释放 ctx 与字体 */
         SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
         ctx->hFont = CreateUIFont(GetDpiOf(hwnd));
-        ctx->icon = NULL;
-
-        /*
-         * 进程图标：优先用 exe 自带的大图标，抽不到再退到系统按扩展名给的通用图标。
-         * 只用 ExtractIconEx 会留下大片空白——svchost/lsass/System 这些系统二进制
-         * 本身就没有图标资源，而列表里恰恰大半是它们。
-         * 连完整路径都读不到时（权限不足）拿进程名兜底：SHGFI_USEFILEATTRIBUTES
-         * 只看扩展名，不要求文件真的存在，所以「svchost.exe」「System」也能出图。
-         * 列表里不放图标是因为绝大多数行图标几乎全一样，详情窗口看的才是具体那个进程。
-         */
-        if (pe->procPath[0]) {
-            HICON hIcon = NULL;
-            /* iIconIndex=0 取第一个图标（通常是 256/48/32 的最大尺寸）；
-             * SS_ICON 会自行缩放到控件大小，不必挑特定尺寸。 */
-            if (ExtractIconExW(pe->procPath, 0, &hIcon, NULL, 1) != 0)
-                ctx->icon = hIcon;
-        }
-        if (!ctx->icon) {
-            SHFILEINFOW sfi;
-            const WCHAR *key = pe->procPath[0] ? pe->procPath : pe->procName;
-            ZeroMemory(&sfi, sizeof(sfi));
-            if (SHGetFileInfoW(key, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi),
-                               SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))
-                ctx->icon = sfi.hIcon;
-        }
-
-        if (ctx->icon) {
-            h = CreateWindowExW(0, L"Static", L"",
-                                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE,
-                                0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ICO, g_hInst, NULL);
-            /*
-             * SS_ICON 静态控件在这里把图标句柄放 wParam，与 MSDN 记载的
-             * wParam=ICON_BIG/ICON_SMALL 写法相反。这是实测结果，不是文档约定：
-             * 按文档写法发，控件只画出一个灰块，图标一个都不显示。
-             * 仅适用于 SS_ICON，别套到普通静态控件或 WM_SETICON 上。
-             */
-            SendMessage(h, STM_SETICON, (WPARAM)ctx->icon, 0);
-        }
+        ctx->alive = TRUE;
 
         _snwprintf(buf, 512, L"%s  (PID %u)", ctx->entry.procName, ctx->entry.pid);
         h = CreateWindowExW(0, L"Static", buf, WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -1049,12 +1445,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_CMD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        buf[0] = 0;
-        if (!ProcGetCommandLine(ctx->entry.pid, buf, 512)) {
-            wcsncpy(buf, L"（不可用）", 511);
-            buf[511] = 0;
-        }
-        h = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", buf,
+        h = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"正在读取…",
                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
                             ES_READONLY | ES_MULTILINE | ES_AUTOVSCROLL,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ED_CMD, g_hInst, NULL);
@@ -1081,7 +1472,6 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 col.cx = S(hwnd, widths[i]);
                 ListView_InsertColumn(h, i, &col);
             }
-            FillModules(h, ctx->entry.pid);
         }
 
         h = CreateWindowExW(0, L"Button", L"打开所在目录",
@@ -1105,6 +1495,29 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetCtlFont(h, ctx->hFont);
 
         SendMessage(hwnd, WM_SIZE, 0, 0);
+        RequestDetail(hwnd, ctx);
+        return 0;
+    }
+
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO *mmi = (MINMAXINFO *)lp;
+        mmi->ptMinTrackSize.x = S(hwnd, 620);
+        mmi->ptMinTrackSize.y = S(hwnd, 420);
+        return 0;
+    }
+
+    case WM_DPICHANGED:
+    {
+        RECT *suggested = (RECT *)lp;
+        if (ctx && ctx->hFont) DeleteObject(ctx->hFont);
+        if (ctx) {
+            ctx->hFont = CreateUIFont(GetDpiOf(hwnd));
+            EnumChildWindows(hwnd, SetFontProc, (LPARAM)ctx->hFont);
+        }
+        SetWindowPos(hwnd, NULL, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
 
@@ -1134,7 +1547,11 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         MoveCtl(hwnd, D_ST_MOD, pad, y + S(hwnd, 122), w - pad * 2, S(hwnd, 18));
 
         y += S(hwnd, 140);
-        MoveCtl(hwnd, D_LIST_MOD, pad, y, w - pad * 2, h - y - pad - bh - S(hwnd, 8));
+        {
+            int listH = h - y - pad - bh - S(hwnd, 8);
+            if (listH < S(hwnd, 40)) listH = S(hwnd, 40);
+            MoveCtl(hwnd, D_LIST_MOD, pad, y, w - pad * 2, listH);
+        }
 
         x = w - pad;
         x -= bw;
@@ -1165,7 +1582,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
 
         case D_BTN_RELOAD:
-            if (ctx) FillModules(GetDlgItem(hwnd, D_LIST_MOD), ctx->entry.pid);
+            if (ctx) RequestDetail(hwnd, ctx);
             return 0;
 
         case D_BTN_CLOSE:
@@ -1180,16 +1597,28 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (item >= 0) {
                 WCHAR path[MAX_PATH];
                 ListView_GetItemText(GetDlgItem(hwnd, D_LIST_MOD), item, 1, path, MAX_PATH);
-                ProcOpenFileLocation(hwnd, path);
+                if (!path[0] || !ProcOpenFileLocation(hwnd, path)) {
+                    MessageBoxW(hwnd, L"无法打开该模块所在位置。", L"提示",
+                                MB_OK | MB_ICONWARNING);
+                }
             }
             return 0;
         }
         break;
 
+    case WM_APP_DETAIL:
+        if (ctx) ApplyDetailResult(hwnd, ctx, (DETAIL_RESULT *)lp);
+        else FreeDetailResult((DETAIL_RESULT *)lp);
+        return 0;
+
     case WM_DESTROY:
+        DiscardQueuedDetail(hwnd);
         if (ctx) {
+            ctx->alive = FALSE;
+            ctx->generation++;
             if (ctx->hFont) DeleteObject(ctx->hFont);
             if (ctx->icon) DestroyIcon(ctx->icon);
+            free(ctx->commandLine);
             free(ctx);
         }
         SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
@@ -1234,15 +1663,18 @@ static void LayoutColumns(HWND hwnd)
 
     fixed = 0;
     for (i = 0; i < COL_PATH; ++i) {
-        int cx = S(hwnd, COL_WIDTHS[i]);
-        ListView_SetColumnWidth(g_hList, i, cx);
+        int cx = g_colUserSized[i] ? ListView_GetColumnWidth(g_hList, i)
+                                   : S(hwnd, COL_WIDTHS[i]);
+        if (!g_colUserSized[i]) ListView_SetColumnWidth(g_hList, i, cx);
         fixed += cx;
     }
 
-    /* 留一点余量，避免正好卡在临界值上凭空多出一条横向滚动条 */
-    pathW = avail - fixed - S(hwnd, 2);
-    if (pathW < S(hwnd, COL_PATH_MIN)) pathW = S(hwnd, COL_PATH_MIN);
-    ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
+    /* 用户拖过路径列后保留其宽度；否则路径列继续吃掉剩余空间。 */
+    if (!g_colUserSized[COL_PATH]) {
+        pathW = avail - fixed - S(hwnd, 2);
+        if (pathW < S(hwnd, COL_PATH_MIN)) pathW = S(hwnd, COL_PATH_MIN);
+        ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
+    }
 }
 
 static void LayoutMain(HWND hwnd)
@@ -1398,9 +1830,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DPICHANGED:
     {
+        RECT *suggested = (RECT *)lp;
         if (g_hFont) DeleteObject(g_hFont);
-        g_hFont = CreateUIFont(GetDpiOf(hwnd));
+        g_hFont = CreateUIFont(HIWORD(wp));
         EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_hFont);
+        SetWindowPos(hwnd, NULL, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
         LayoutMain(hwnd);
         return 0;
     }
@@ -1430,13 +1866,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_LISTEN:
             g_listenOnly = !g_listenOnly;
             SyncFilterMenu();
-            ApplyView();
+            ApplyView(FALSE);
             return 0;
 
         case IDM_HIDESYS:
             g_hideSystem = !g_hideSystem;
             SyncFilterMenu();
-            ApplyView();
+            ApplyView(FALSE);
             return 0;
 
         case IDM_PROTO_ALL:
@@ -1447,7 +1883,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             /* 协议子菜单的 5 项连续编号，偏移即 MatchProto 的取值 */
             g_protoFilter = LOWORD(wp) - IDM_PROTO_ALL;
             SyncFilterMenu();
-            ApplyView();
+            ApplyView(FALSE);
             return 0;
 
         case ID_EDIT_FILTER:
@@ -1460,7 +1896,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 SetFocus(g_hEdit);
                 SendMessage(g_hEdit, EM_SETSEL, 0, -1);
             } else if (HIWORD(wp) == EN_CHANGE) {
-                ApplyView();
+                SetTimer(hwnd, ID_FILTER_TIMER, FILTER_DEBOUNCE_MS, NULL);
             }
             return 0;
 
@@ -1505,7 +1941,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_listenOnly = 0;
             g_hideSystem = 0;
             SyncFilterMenu();
-            ApplyView();
+            ApplyView(FALSE);
             SetFocus(g_hList);
             return 0;
 
@@ -1551,19 +1987,23 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             const PORT_ENTRY *e = SelectedEntry();
             if (e) {
                 SetWindowTextW(g_hEdit, e->procName);
-                ApplyView();
+                ApplyView(FALSE);
             }
             return 0;
         }
         }
         break;
 
-    case WM_LBUTTONDOWN:
-        if (HitAdminCell(hwnd)) {
-            ConfirmElevate(hwnd);
+    case WM_CONTEXTMENU:
+        /* 鼠标右键已经由 NM_RCLICK 弹出菜单；这里只接键盘菜单键（坐标为 -1,-1）。 */
+        if ((HWND)wp == g_hList && lp == (LPARAM)-1) {
+            POINT pt = { 0, 0 };
+            int item = ListView_GetNextItem(g_hList, -1, LVNI_SELECTED);
+            ClientToScreen(g_hList, &pt);
+            ShowContextMenu(hwnd, item, pt.x, pt.y);
             return 0;
         }
-        return 0;
+        break;
 
     case WM_NOTIFY:
     {
@@ -1623,7 +2063,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     g_sortCol = col;
                     g_sortAsc = 1;
                 }
-                ApplyView();
+                ApplyView(FALSE);
                 return 0;
             }
             if (hdr->code == NM_DBLCLK) {
@@ -1639,19 +2079,53 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
+        if (hdr->hwndFrom == ListView_GetHeader(g_hList) &&
+            (hdr->code == HDN_ENDTRACKW || hdr->code == HDN_DIVIDERDBLCLICKW)) {
+            NMHEADERW *header = (NMHEADERW *)lp;
+            if (header->iItem >= 0 && header->iItem < COL_COUNT)
+                g_colUserSized[header->iItem] = 1;
+            return 0;
+        }
+        if (hdr->hwndFrom == g_hStatus && hdr->code == NM_CLICK && !ProcIsElevated()) {
+            NMMOUSE *mouse = (NMMOUSE *)lp;
+            int parts[2] = {0, 0};
+            if (SendMessageW(g_hStatus, SB_GETPARTS, 2, (LPARAM)parts) >= 2 &&
+                mouse->pt.x >= parts[0]) {
+                ConfirmElevate(hwnd);
+            }
+            return 0;
+        }
         break;
     }
 
     case WM_TIMER:
-        if (wp == ID_TIMER) ReloadAndApply();
+        if (wp == ID_FILTER_TIMER) {
+            KillTimer(hwnd, ID_FILTER_TIMER);
+            ApplyView(FALSE);
+        } else if (wp == ID_TIMER) {
+            ReloadAndApply();
+        } else if (wp == ID_KILL_TIMER) {
+            SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)L"正在结束进程…");
+        }
         return 0;
 
     case WM_APP_REFRESH:
         ReloadAndApply();
         return 0;
 
+    case WM_APP_PORTS:
+        ApplyPortsResult((PORTS_RESULT *)lp);
+        return 0;
+
+    case WM_APP_KILL:
+        FinishKill((KILL_REQUEST *)lp);
+        return 0;
+
     case WM_DESTROY:
+        DiscardQueuedWork(hwnd);
         KillTimer(hwnd, ID_TIMER);
+        KillTimer(hwnd, ID_FILTER_TIMER);
+        KillTimer(hwnd, ID_KILL_TIMER);
         g_hInfoBar = NULL;
         free(g_all);
         free(g_view);
@@ -1737,40 +2211,38 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
 
     /* 工具类软件的常用操作交给键盘：查看详情、结束进程、复制行都要能一按到底 */
     accels[2].fVirt = FVIRTKEY;
-    accels[2].key = VK_RETURN;
-    accels[2].cmd = IDM_DETAIL;
+    accels[2].key = VK_ESCAPE;
+    accels[2].cmd = IDM_CLEAR;
 
-    accels[3].fVirt = FVIRTKEY;
-    accels[3].key = VK_DELETE;
-    accels[3].cmd = IDM_KILL;
+    accels[3].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
+    accels[3].key = 'E';
+    accels[3].cmd = IDM_ELEVATE;
 
-    accels[4].fVirt = FVIRTKEY | FCONTROL;
-    accels[4].key = 'C';
-    accels[4].cmd = IDM_COPY_ROW;
+    accels[4].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
+    accels[4].key = 'R';
+    accels[4].cmd = IDM_AUTO;
 
-    accels[5].fVirt = FVIRTKEY | FCONTROL;
-    accels[5].key = 'A';
-    accels[5].cmd = IDM_COPY_PATH;
-
-    accels[6].fVirt = FVIRTKEY;
-    accels[6].key = VK_ESCAPE;
-    accels[6].cmd = IDM_CLEAR;
-
-    accels[7].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
-    accels[7].key = 'E';
-    accels[7].cmd = IDM_ELEVATE;
-
-    accels[8].fVirt = FVIRTKEY | FSHIFT;
-    accels[8].key = VK_TAB;
-    accels[8].cmd = IDM_KILL_TREE;
-
-    accels[9].fVirt = FVIRTKEY | FCONTROL | FSHIFT;
-    accels[9].key = 'R';
-    accels[9].cmd = IDM_AUTO;
-
-    hAccel = CreateAcceleratorTableW(accels, 9);
+    hAccel = CreateAcceleratorTableW(accels, 5);
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        HWND focus = GetFocus();
+        BOOL listKey = focus == g_hList && msg.message == WM_KEYDOWN;
+        if (listKey && msg.wParam == VK_RETURN) {
+            SendMessageW(hwnd, WM_COMMAND, IDM_DETAIL, 0);
+            continue;
+        }
+        if (listKey && msg.wParam == VK_DELETE) {
+            SendMessageW(hwnd, WM_COMMAND, IDM_KILL, 0);
+            continue;
+        }
+        if (listKey && msg.wParam == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            SendMessageW(hwnd, WM_COMMAND, IDM_COPY_ROW, 0);
+            continue;
+        }
+        if (listKey && msg.wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            SendMessageW(hwnd, WM_COMMAND, IDM_COPY_PATH, 0);
+            continue;
+        }
         if (!hAccel || !TranslateAcceleratorW(hwnd, hAccel, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
