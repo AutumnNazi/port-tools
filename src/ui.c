@@ -26,6 +26,7 @@
 #define ID_LBL_NAME    1023
 #define ID_LBL_KEY     1024
 #define ID_BTN_REFRESH 1002
+#define ID_BTN_FILTER  1017
 #define ID_CHK_AUTO    1003
 #define ID_BTN_ADMIN   1004
 #define ID_LIST        1005
@@ -117,7 +118,36 @@ static HWND g_hLblPid;
 static HWND g_hLblName;
 static HWND g_hLblKey;
 static HWND g_hBtnRefresh;
+static HWND g_hBtnFilter;
+static HMENU g_filterMenu;
 static HBRUSH g_hQueryBrush;
+
+/* 系统默认把示例文字贴在文字区顶部。按当前字体高度把文字区收成居中的一条。 */
+static LRESULT CALLBACK QueryEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR id, DWORD_PTR ref)
+{
+    if (msg == WM_NCCALCSIZE && wp) {
+        LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+        NCCALCSIZE_PARAMS *params = (NCCALCSIZE_PARAMS *)lp;
+        HDC hdc = GetDC(hwnd);
+        HFONT old = (HFONT)SelectObject(hdc, (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0));
+        TEXTMETRICW tm;
+        int height, extra;
+        GetTextMetricsW(hdc, &tm);
+        SelectObject(hdc, old);
+        ReleaseDC(hwnd, hdc);
+        height = params->rgrc[0].bottom - params->rgrc[0].top;
+        extra = (height - (tm.tmHeight + tm.tmExternalLeading)) / 2;
+        if (extra > 0) {
+            params->rgrc[0].top += extra;
+            params->rgrc[0].bottom -= extra;
+        }
+        (void)ref;
+        return result;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, QueryEditProc, id);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
 static HWND g_hInfoBar;
 static HWND g_hStatus;
 static HFONT g_hFont;
@@ -600,7 +630,7 @@ static HMENU BuildMainMenu(void)
     AppendMenuW(filter, MF_POPUP, (UINT_PTR)proto, L"协议(&P)");
 
     bar = CreateMenu();
-    AppendMenuW(bar, MF_POPUP, (UINT_PTR)filter, L"筛选(&F)");
+    AppendMenuW(bar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)filter, L"筛选(&F)");
     return bar;
 }
 
@@ -608,7 +638,8 @@ static HMENU BuildMainMenu(void)
 static void SyncFilterMenu(void)
 {
     HMENU bar = GetMenu(g_hwndMain);
-    HMENU filter, proto;
+    HMENU filter;
+    HMENU proto;
 
     if (!bar) return;
     filter = GetSubMenu(bar, 0);
@@ -1809,6 +1840,7 @@ static void LayoutMain(HWND hwnd)
         int wPidLabel = S(hwnd, 30);
         int wNameLabel = S(hwnd, 48);
         int wKeyLabel = S(hwnd, 48);
+        int editPad = 0;
         int wPort = S(hwnd, 72);
         int wPid = S(hwnd, 76);
         int used = wPortLabel + wPort + wPidLabel + wPid + wNameLabel + wRefresh + gap * 3 + labelGap * 3;
@@ -1816,30 +1848,33 @@ static void LayoutMain(HWND hwnd)
         int x = pad;
         int y = toolbarY;
         int toolbarH = bh * 2 + rowGap;
+        int listTop, listH;
 
         if (wName < S(hwnd, 110)) wName = S(hwnd, 110);
         MoveWindow(g_hLblPort, x, y, wPortLabel, bh, TRUE);
         x += wPortLabel + labelGap;
-        MoveWindow(g_hEditPort, x, y, wPort, bh, TRUE);
+        MoveWindow(g_hEditPort, x, y, wPort, bh + editPad, TRUE);
         x += wPort + gap;
         MoveWindow(g_hLblPid, x, y, wPidLabel, bh, TRUE);
         x += wPidLabel + labelGap;
-        MoveWindow(g_hEditPid, x, y, wPid, bh, TRUE);
+        MoveWindow(g_hEditPid, x, y, wPid, bh + editPad, TRUE);
         x += wPid + gap;
         MoveWindow(g_hLblName, x, y, wNameLabel, bh, TRUE);
         x += wNameLabel + labelGap;
-        MoveWindow(g_hEditName, x, y, wName, bh, TRUE);
+        MoveWindow(g_hEditName, x, y, wName, bh + editPad, TRUE);
         MoveWindow(g_hBtnRefresh, w - pad - wRefresh, y, wRefresh, bh, TRUE);
 
         y += bh + rowGap;
         x = pad;
         MoveWindow(g_hLblKey, x, y, wKeyLabel, bh, TRUE);
         x += wKeyLabel + labelGap;
-        MoveWindow(g_hEdit, x, y, w - pad - x, bh, TRUE);
-        MoveWindow(g_hList, 0, toolbarY + toolbarH + S(hwnd, 6), w,
-                   h - (toolbarY + toolbarH + S(hwnd, 6)) - sbH - S(hwnd, 26), TRUE);
+        MoveWindow(g_hEdit, x, y, w - pad - x, bh + editPad, TRUE);
+        listTop = toolbarY + toolbarH + S(hwnd, 6);
+        listH = h - sbH - listTop;
+        if (listH < S(hwnd, 80)) listH = S(hwnd, 80);
+        MoveWindow(g_hList, 0, listTop, w, listH, TRUE);
+        if (g_hInfoBar) ShowWindow(g_hInfoBar, SW_HIDE);
     }
-    MoveWindow(g_hInfoBar, 0, h - sbH - S(hwnd, 26), w, S(hwnd, 26), TRUE);
     LayoutColumns(hwnd);
 
     parts[0] = w - S(hwnd, 220);
@@ -1878,18 +1913,24 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
                                       g_hInst, NULL);
         SendMessage(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)L"80");
+        SendMessage(g_hEditPort, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
+        SetWindowSubclass(g_hEditPort, QueryEditProc, 1, 0);
 
         g_hEditPid = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
                                      g_hInst, NULL);
         SendMessage(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)L"1234");
+        SendMessage(g_hEditPid, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
+        SetWindowSubclass(g_hEditPid, QueryEditProc, 2, 0);
 
         g_hEditName = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
                                       g_hInst, NULL);
         SendMessage(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)L"nginx.exe");
+        SendMessage(g_hEditName, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
+        SetWindowSubclass(g_hEditName, QueryEditProc, 3, 0);
 
         g_hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -1897,6 +1938,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                   g_hInst, NULL);
         SendMessage(g_hEdit, EM_SETCUEBANNER, TRUE,
                     (LPARAM)L"地址、路径或状态");
+        SendMessage(g_hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
+        SetWindowSubclass(g_hEdit, QueryEditProc, 4, 0);
 
         g_hBtnRefresh = CreateWindowExW(0, L"Button", L"刷新 (F5)",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -1979,15 +2022,49 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetBkColor((HDC)wp, RGB(255, 255, 255));
         return (LRESULT)GetStockObject(WHITE_BRUSH);
 
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT *item = (MEASUREITEMSTRUCT *)lp;
+        if (item->CtlType == ODT_MENU) {
+            item->itemWidth = S(hwnd, 42);
+            item->itemHeight = S(hwnd, 32);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lp;
+        RECT rc = item->rcItem;
+        HBRUSH fill;
+        HPEN pen, oldPen;
+        if (item->CtlType != ODT_MENU) break;
+        InflateRect(&rc, -S(hwnd, 2), -S(hwnd, 1));
+        fill = CreateSolidBrush((item->itemState & ODS_SELECTED) ? RGB(208, 212, 218) : RGB(232, 235, 239));
+        pen = CreatePen(PS_SOLID, 1, RGB(150, 156, 164));
+        FillRect(item->hDC, &rc, fill);
+        oldPen = (HPEN)SelectObject(item->hDC, pen);
+        SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(item->hDC, rc.left, rc.top, rc.right, rc.bottom);
+        SelectObject(item->hDC, oldPen);
+        SetBkMode(item->hDC, TRANSPARENT);
+        SetTextColor(item->hDC, RGB(32, 32, 32));
+        DrawTextW(item->hDC, L"筛选", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DeleteObject(fill);
+        DeleteObject(pen);
+        return TRUE;
+    }
+
     case WM_ERASEBKGND:
     {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        rc.bottom = S(hwnd, 72);
+        rc.bottom = S(hwnd, 78);
         FillRect((HDC)wp, &rc, g_hQueryBrush);
         rc.top = rc.bottom;
         GetClientRect(hwnd, &rc);
-        rc.top = S(hwnd, 72);
+        rc.top = S(hwnd, 78);
         FillRect((HDC)wp, &rc, GetSysColorBrush(COLOR_WINDOW));
         return 1;
     }
@@ -2310,6 +2387,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_view = NULL;
         if (g_hFont) DeleteObject(g_hFont);
         if (g_hQueryBrush) { DeleteObject(g_hQueryBrush); g_hQueryBrush = NULL; }
+        g_filterMenu = NULL;
         PostQuitMessage(0);
         return 0;
     }
@@ -2364,7 +2442,6 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
         if (p) dpi = p();
     }
 
-    /* 菜单必须在建窗前建好：hMenu 参数只在创建时生效，之后只能 SetMenu */
     menu = BuildMainMenu();
     if (!menu) return 1;
 
