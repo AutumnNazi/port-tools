@@ -7,7 +7,7 @@ A lightweight native Windows port tool: **find out what holds each port → loca
 - Pure C + Win32 API, no runtime dependencies (statically linked CRT, single exe, ~100 KB)
 - No installation, download and run; supports Windows 7 ~ Windows 11 (x64 / x86)
 - Full TCP / UDP, IPv4 / IPv6 connections and listening ports
-- The interface starts in English and switches to 中文 from the **Language** menu at any time, no restart needed
+- The interface starts in Chinese and switches to English from the **Language** menu at any time; the choice is saved, so the next launch opens in the language you last used
 
 ## Download
 
@@ -36,7 +36,7 @@ git tag v1.0.0 && git push origin v1.0.0
 | Filtering | The query row offers four conditions: local port, PID, process name, and a general keyword. The first three match only their own field, while the keyword keeps matching across addresses, paths, states and every other field; conditions you fill in together are combined with AND. `Ctrl+F` focuses the keyword box |
 | Exact match | When checked in the **Filter** menu, the search text must equal a port, PID, protocol, state, address, process name or file name in full. For example, searching `80` keeps only port 80 and no longer pulls in 8000, 8080, or records whose path contains 80. Off by default |
 | Filter menu | The **Filter** menu holds every structured condition: four check items (Auto Refresh / Listening Only / Hide System Ports / Exact Match), the Protocol submenu (All / TCP / UDP / IPv4 / IPv6), and "Clear All Filters". Check marks are shown in the menu itself, and the status bar at the bottom lists the conditions currently in effect |
-| Language menu | The **Language** menu switches the whole interface between English and 中文 (English by default). Menus, column headers, the query row, the status bar, hints and message boxes all change, and the list you are looking at is repainted and re-sorted in the new language immediately — no restart |
+| Language menu | The **Language** menu switches the whole interface between English and 中文 (Chinese by default; the choice is stored under `HKCU\Software\PortView` and reused on the next launch). Menus, column headers, the query row, the status bar, hints and message boxes all change, and the list you are looking at is repainted and re-sorted in the new language immediately — no restart |
 | Listening only | When checked in the **Filter** menu, only ports in the listening state are kept, filtering out the noise of established connections |
 | Hide system ports | When checked in the **Filter** menu, ports held by key system processes are dropped — System, csrss, winlogon, services, lsass, svchost and friends (ending these would threaten system stability). Off by default |
 | Sorting | Click a column header to sort, click again to reverse |

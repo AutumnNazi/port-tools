@@ -136,8 +136,37 @@ enum {
     TXT_COUNT
 };
 
-/* 1=英文（默认），0=中文 */
-static int g_english = 1;
+/* 1=英文，0=中文（默认）。启动时从注册表读回上次的选择 */
+static int g_english = 0;
+
+/*
+ * 语言偏好放 HKCU\Software\PortView：单文件免安装的工具，
+ * 用户切了语言后重开还是原样，不用每次进菜单。
+ */
+static void LoadLanguagePreference(void)
+{
+    HKEY key;
+    DWORD type = 0, value = 0, size = sizeof(value);
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PortView", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return;
+    if (RegQueryValueExW(key, L"Language", NULL, &type, (BYTE *)&value, &size) == ERROR_SUCCESS &&
+        type == REG_DWORD)
+        g_english = value ? 1 : 0;
+    RegCloseKey(key);
+}
+
+static void SaveLanguagePreference(void)
+{
+    HKEY key;
+    DWORD value = g_english ? 1u : 0u;
+
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\PortView", 0, NULL, 0, KEY_WRITE,
+                        NULL, &key, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(key, L"Language", 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
+        RegCloseKey(key);
+    }
+}
 
 static const WCHAR *const TEXT_EN[TXT_COUNT] = {
     [TXT_FILTER] = L"&Filter", [TXT_LANGUAGE] = L"&Language",
@@ -376,11 +405,75 @@ static HWND g_hLblName;
 static HWND g_hLblKey;
 static HWND g_hBtnRefresh;
 static HBRUSH g_hQueryBrush;
+static HBRUSH g_hQueryLineBrush;
 
-/* 系统默认把示例文字贴在文字区顶部。按当前字体高度把文字区收成居中的一条。 */
+/*
+ * 查询区输入框的描边。控件自己那圈框（主题的或 WS_BORDER 的）在调整文字区之后
+ * 会露在描边里面，成了「框里还有一层框」，所以输入框不带任何边框样式，
+ * 描边统一在 WM_PAINT 里等控件画完再补上。
+ */
+#define QUERY_BAND_RGB       RGB(245, 248, 252)
+#define QUERY_LINE_RGB       RGB(223, 228, 235)
+#define QUERY_BORDER         RGB(208, 213, 219)
+#define QUERY_BORDER_HOT     RGB(156, 165, 176)
+#define QUERY_BORDER_FOCUS   RGB(47, 84, 150)
+#define QUERY_HOVER          1
+
+static COLORREF QueryBorderColor(HWND hwnd)
+{
+    if (GetFocus() == hwnd) return QUERY_BORDER_FOCUS;
+    if (GetWindowLongPtr(hwnd, GWLP_USERDATA) & QUERY_HOVER) return QUERY_BORDER_HOT;
+    return QUERY_BORDER;
+}
+
+/*
+ * 描边。文字区被 WM_NCCALCSIZE 收成居中的一条，控件只刷自己那一条客户区，
+ * 上下留下的边会露出父窗口底色，看起来像「框里还有一层框」，
+ * 所以非客户区重画时先把整块铺成输入框底色，再画描边。
+ */
+static void DrawQueryBorder(HWND hwnd, int fillGap)
+{
+    HDC hdc = GetWindowDC(hwnd);
+    RECT wr, seg;
+    HBRUSH brush;
+    int w, h;
+
+    if (!hdc) return;
+    GetWindowRect(hwnd, &wr);
+    w = wr.right - wr.left;
+    h = wr.bottom - wr.top;
+
+    if (fillGap) {
+        seg.left = 0; seg.top = 0; seg.right = w; seg.bottom = h;
+        FillRect(hdc, &seg, GetSysColorBrush(COLOR_WINDOW));
+    }
+
+    brush = CreateSolidBrush(QueryBorderColor(hwnd));
+    seg.left = 0; seg.right = w; seg.top = 0; seg.bottom = 1;
+    FillRect(hdc, &seg, brush);
+    seg.top = h - 1; seg.bottom = h;
+    FillRect(hdc, &seg, brush);
+    seg.left = 0; seg.right = 1; seg.top = 0; seg.bottom = h;
+    FillRect(hdc, &seg, brush);
+    seg.left = w - 1; seg.right = w;
+    FillRect(hdc, &seg, brush);
+    DeleteObject(brush);
+    ReleaseDC(hwnd, hdc);
+}
+
+/*
+ * 焦点/悬停变化后要整窗重画：上下两条边落在被 WM_NCCALCSIZE 收窄出来的非客户区里，
+ * 只失效客户区的话它们不会跟着换色。
+ */
+static void RepaintQueryBorder(HWND hwnd)
+{
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE);
+}
+
 static LRESULT CALLBACK QueryEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                       UINT_PTR id, DWORD_PTR ref)
 {
+    /* 系统默认把示例文字贴在文字区顶部。按当前字体高度把文字区收成居中的一条。 */
     if (msg == WM_NCCALCSIZE && wp) {
         LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
         NCCALCSIZE_PARAMS *params = (NCCALCSIZE_PARAMS *)lp;
@@ -400,12 +493,51 @@ static LRESULT CALLBACK QueryEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         (void)ref;
         return result;
     }
+    /* 描边等控件把自己画完之后再补，保证始终盖在最上层（客户区已经刷白，不用再铺） */
+    if (msg == WM_PAINT) {
+        LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+        DrawQueryBorder(hwnd, 0);
+        return result;
+    }
+    /* 上下两条边落在非客户区，这条路径要顺手把露底色的那几条边铺白 */
+    if (msg == WM_NCPAINT) {
+        DrawQueryBorder(hwnd, 1);
+        return 0;
+    }
+    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
+        LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+        RepaintQueryBorder(hwnd);
+        return result;
+    }
+    if (msg == WM_MOUSEMOVE && !(GetWindowLongPtr(hwnd, GWLP_USERDATA) & QUERY_HOVER)) {
+        TRACKMOUSEEVENT tme;
+        ZeroMemory(&tme, sizeof(tme));
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, QUERY_HOVER);
+        RepaintQueryBorder(hwnd);
+    } else if (msg == WM_MOUSELEAVE) {
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        RepaintQueryBorder(hwnd);
+    }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, QueryEditProc, id);
     return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static void InitQueryEdit(HWND edit, UINT_PTR id)
+{
+    /* 主题的 EDIT 会在客户区里再画一圈边框，和上面那层 1px 描边叠成「框里有框」，
+     * 所以这几个输入框不走主题，边框只由 QueryEditProc 画。 */
+    SetWindowTheme(edit, L"", L"");
+    SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 6));
+    SetWindowSubclass(edit, QueryEditProc, id, 0);
 }
 static HWND g_hInfoBar;
 static HWND g_hStatus;
 static HFONT g_hFont;
+static HIMAGELIST g_hRowSpacer;
 
 static PORT_ENTRY *g_all = NULL;
 static size_t g_allCount = 0;
@@ -2103,6 +2235,45 @@ static int LabelWidth(HWND label, int fallback)
     return size.cx + S(label, 6);   /* 留一点余量，避免末字符贴边 */
 }
 
+/*
+ * 列表行高。报告视图默认只按字体高度排行，字贴着上边线显得很挤；
+ * 挂一个 1px 宽、按目标行高撑开的全透明小图列表，行高交给它，
+ * 宽度只占 1px，列文字前面不会多出放图标的位置。
+ */
+static void ApplyRowHeight(HWND hwnd)
+{
+    HIMAGELIST list;
+    HBITMAP bmp, oldBmp;
+    HDC hdc, mem;
+    int h = S(hwnd, 24);
+
+    hdc = GetDC(hwnd);
+    if (!hdc) return;
+    list = ImageList_Create(1, h, ILC_COLOR32 | ILC_MASK, 1, 1);
+    bmp = CreateCompatibleBitmap(hdc, 1, h);
+    if (list && bmp) {
+        mem = CreateCompatibleDC(hdc);
+        oldBmp = (HBITMAP)SelectObject(mem, bmp);
+        PatBlt(mem, 0, 0, 1, h, BLACKNESS);   /* 全黑配全黑掩码 = 完全透明 */
+        SelectObject(mem, oldBmp);
+        DeleteDC(mem);
+        ImageList_AddMasked(list, bmp, RGB(0, 0, 0));
+    }
+    if (bmp) DeleteObject(bmp);
+    ReleaseDC(hwnd, hdc);
+    if (!list) return;
+
+    if (g_hRowSpacer) ImageList_Destroy(g_hRowSpacer);
+    g_hRowSpacer = list;
+    ListView_SetImageList(g_hList, list, LVSIL_SMALL);
+}
+
+/* 查询区总高度：顶距 + 关键字行 + 行距 + 精确字段行 + 底距。底色和列表上沿都取这个值 */
+static int QueryBandHeight(HWND hwnd)
+{
+    return S(hwnd, 6 + 28 + 8 + 28 + 6);
+}
+
 static void LayoutMain(HWND hwnd)
 {
     RECT rc, rs;
@@ -2115,7 +2286,7 @@ static void LayoutMain(HWND hwnd)
     w = rc.right;
     h = rc.bottom;
     pad = S(hwnd, 8);
-    bh = S(hwnd, 26);
+    bh = S(hwnd, 28);
     toolbarY = S(hwnd, 6);
 
     /*
@@ -2139,48 +2310,56 @@ static void LayoutMain(HWND hwnd)
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     /*
-     * 查询区固定两行：第一行放三个精确字段和刷新，第二行让关键字占满宽度。
-     * 这样窗口缩放时控件位置不跳动，关键字也不会被挤掉。
+     * 查询区两行：第一行只有关键字，独占整行；第二行放三个精确字段，
+     * 末尾按窗口右边缘对齐刷新。刷新挪到这里是因为跟在关键字后面会被当成
+     * 「搜索按钮」，而它其实是全局动作，和填了什么条件无关。
      */
     {
-        int gap = S(hwnd, 8);
-        int labelGap = S(hwnd, 4);
-        int rowGap = S(hwnd, 6);
+        int gap = S(hwnd, 10);
+        int labelGap = S(hwnd, 6);
+        int rowGap = S(hwnd, 8);
         int wRefresh = S(hwnd, 86);
-        int wPortLabel = LabelWidth(g_hLblPort, S(hwnd, 34));
-        int wPidLabel = LabelWidth(g_hLblPid, S(hwnd, 30));
-        int wNameLabel = LabelWidth(g_hLblName, S(hwnd, 48));
-        int wKeyLabel = LabelWidth(g_hLblKey, S(hwnd, 48));
-        int editPad = 0;
-        int wPort = S(hwnd, 72);
-        int wPid = S(hwnd, 76);
-        int used = wPortLabel + wPort + wPidLabel + wPid + wNameLabel + wRefresh + gap * 3 + labelGap * 3;
-        int wName = w - pad * 2 - used;
+        int wLabel = LabelWidth(g_hLblKey, S(hwnd, 48));
+        int t = LabelWidth(g_hLblPort, S(hwnd, 34));
+        int wPort = S(hwnd, 88);      /* 端口号最长 5 位 */
+        int wPid = S(hwnd, 96);       /* PID 常见 7~8 位 */
+        int wName, room;
         int x = pad;
         int y = toolbarY;
-        int toolbarH = bh * 2 + rowGap;
         int listTop, listH;
 
-        if (wName < S(hwnd, 110)) wName = S(hwnd, 110);
-        MoveWindow(g_hLblPort, x, y, wPortLabel, bh, TRUE);
-        x += wPortLabel + labelGap;
-        MoveWindow(g_hEditPort, x, y, wPort, bh + editPad, TRUE);
-        x += wPort + gap;
-        MoveWindow(g_hLblPid, x, y, wPidLabel, bh, TRUE);
-        x += wPidLabel + labelGap;
-        MoveWindow(g_hEditPid, x, y, wPid, bh + editPad, TRUE);
-        x += wPid + gap;
-        MoveWindow(g_hLblName, x, y, wNameLabel, bh, TRUE);
-        x += wNameLabel + labelGap;
-        MoveWindow(g_hEditName, x, y, wName, bh + editPad, TRUE);
-        MoveWindow(g_hBtnRefresh, w - pad - wRefresh, y, wRefresh, bh, TRUE);
+        /* 四个标签取同一个宽度并右对齐，两行的输入框左边缘才落在同一条竖线上 */
+        if (t > wLabel) wLabel = t;
+        t = LabelWidth(g_hLblPid, S(hwnd, 30));
+        if (t > wLabel) wLabel = t;
+        t = LabelWidth(g_hLblName, S(hwnd, 48));
+        if (t > wLabel) wLabel = t;
+
+        MoveWindow(g_hLblKey, x, y, wLabel, bh, TRUE);
+        x += wLabel + labelGap;
+        MoveWindow(g_hEdit, x, y, w - pad - x, bh, TRUE);
 
         y += bh + rowGap;
         x = pad;
-        MoveWindow(g_hLblKey, x, y, wKeyLabel, bh, TRUE);
-        x += wKeyLabel + labelGap;
-        MoveWindow(g_hEdit, x, y, w - pad - x, bh + editPad, TRUE);
-        listTop = toolbarY + toolbarH + S(hwnd, 6);
+        MoveWindow(g_hLblPort, x, y, wLabel, bh, TRUE);
+        x += wLabel + labelGap;
+        MoveWindow(g_hEditPort, x, y, wPort, bh, TRUE);
+        x += wPort + gap;
+        MoveWindow(g_hLblPid, x, y, wLabel, bh, TRUE);
+        x += wLabel + labelGap;
+        MoveWindow(g_hEditPid, x, y, wPid, bh, TRUE);
+        x += wPid + gap;
+        MoveWindow(g_hLblName, x, y, wLabel, bh, TRUE);
+        x += wLabel + labelGap;
+        /* 进程名跟着剩余空间收放，窗口拉到最窄也不会压到刷新按钮上 */
+        wName = S(hwnd, 200);
+        room = w - pad - wRefresh - gap - x;
+        if (wName > room) wName = room;
+        if (wName < S(hwnd, 90)) wName = S(hwnd, 90);
+        MoveWindow(g_hEditName, x, y, wName, bh, TRUE);
+        MoveWindow(g_hBtnRefresh, w - pad - wRefresh, y, wRefresh, bh, TRUE);
+
+        listTop = QueryBandHeight(hwnd);
         listH = h - sbH - listTop;
         if (listH < S(hwnd, 80)) listH = S(hwnd, 80);
         MoveWindow(g_hList, 0, listTop, w, listH, TRUE);
@@ -2235,6 +2414,7 @@ static void ApplyLanguage(int english)
 
     if (g_english == english) return;
     g_english = english;
+    SaveLanguagePreference();
     if (!g_hwndMain) return;
 
     bar = BuildMainMenu();
@@ -2261,49 +2441,56 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndMain = hwnd;
         g_hFont = CreateUIFont(GetDpiOf(hwnd));
-        if (!g_hQueryBrush) g_hQueryBrush = CreateSolidBrush(RGB(241, 246, 252));
+        if (!g_hQueryBrush) g_hQueryBrush = CreateSolidBrush(QUERY_BAND_RGB);
+        if (!g_hQueryLineBrush) g_hQueryLineBrush = CreateSolidBrush(QUERY_LINE_RGB);
 
-        /* 文字统一由 ApplyStaticTexts 按当前语言写入，这里只建控件 */
+        /*
+         * 文字统一由 ApplyStaticTexts 按当前语言写入，这里只建控件。
+         * 标签靠右对齐并且四个共用一个宽度（见 LayoutMain），
+         * 这样两行的输入框左边缘在同一条竖线上。
+         */
         g_hLblPort = CreateWindowExW(0, L"Static", L"",
-                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PORT, g_hInst, NULL);
         g_hLblPid = CreateWindowExW(0, L"Static", L"",
-                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT,
                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PID, g_hInst, NULL);
         g_hLblName = CreateWindowExW(0, L"Static", L"",
-                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_NAME, g_hInst, NULL);
         g_hLblKey = CreateWindowExW(0, L"Static", L"",
-                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT,
                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_KEY, g_hInst, NULL);
 
-        g_hEditPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
-                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
-                                      g_hInst, NULL);
-        SendMessage(g_hEditPort, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
-        SetWindowSubclass(g_hEditPort, QueryEditProc, 1, 0);
-
-        g_hEditPid = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
-                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
-                                     g_hInst, NULL);
-        SendMessage(g_hEditPid, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
-        SetWindowSubclass(g_hEditPid, QueryEditProc, 2, 0);
-
-        g_hEditName = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
-                                      g_hInst, NULL);
-        SendMessage(g_hEditName, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
-        SetWindowSubclass(g_hEditName, QueryEditProc, 3, 0);
-
-        g_hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+        /*
+         * 关键字先建：Tab 顺序跟着创建次序走，主入口要排在精确字段前面。
+         * 不带任何边框样式，描边由 InitQueryEdit 挂的子类统一画。
+         */
+        g_hEdit = CreateWindowExW(0, L"Edit", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_FILTER,
                                   g_hInst, NULL);
-        SendMessage(g_hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
-        SetWindowSubclass(g_hEdit, QueryEditProc, 4, 0);
+        InitQueryEdit(g_hEdit, 4);
+
+        g_hEditPort = CreateWindowExW(0, L"Edit", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                      ES_AUTOHSCROLL | ES_NUMBER,
+                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
+                                      g_hInst, NULL);
+        InitQueryEdit(g_hEditPort, 1);
+
+        g_hEditPid = CreateWindowExW(0, L"Edit", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                     ES_AUTOHSCROLL | ES_NUMBER,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
+                                     g_hInst, NULL);
+        InitQueryEdit(g_hEditPid, 2);
+
+        g_hEditName = CreateWindowExW(0, L"Edit", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
+                                      g_hInst, NULL);
+        InitQueryEdit(g_hEditName, 3);
 
         g_hBtnRefresh = CreateWindowExW(0, L"Button", L"",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -2318,11 +2505,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LIST,
                                   g_hInst, NULL);
         SetWindowTheme(g_hList, L"Explorer", NULL);
+        /* 竖向网格线去掉：斑马纹已经够分行，再加竖线就成了一张表格里塞满表格线 */
         ListView_SetExtendedListViewStyle(g_hList,
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
-                                          LVS_EX_LABELTIP | LVS_EX_GRIDLINES);
+                                          LVS_EX_LABELTIP);
         ListView_SetBkColor(g_hList, RGB(250, 252, 255));
         ListView_SetTextBkColor(g_hList, RGB(250, 252, 255));
+        ApplyRowHeight(hwnd);
         SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
 
         ZeroMemory(&col, sizeof(col));
@@ -2371,7 +2560,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if ((HWND)lp == g_hLblPort || (HWND)lp == g_hLblPid ||
             (HWND)lp == g_hLblName || (HWND)lp == g_hLblKey) {
             SetTextColor((HDC)wp, RGB(47, 84, 150));
-            SetBkColor((HDC)wp, RGB(241, 246, 252));
+            SetBkColor((HDC)wp, QUERY_BAND_RGB);
             return (LRESULT)g_hQueryBrush;
         }
         SetTextColor((HDC)wp, RGB(31, 41, 55));
@@ -2386,12 +2575,19 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ERASEBKGND:
     {
         RECT rc;
+        int band = QueryBandHeight(hwnd);   /* 与 LayoutMain 的 listTop 同一个值 */
+        int clientH;
+
         GetClientRect(hwnd, &rc);
-        rc.bottom = S(hwnd, 78);
+        clientH = rc.bottom;
+        rc.bottom = band;
         FillRect((HDC)wp, &rc, g_hQueryBrush);
-        rc.top = rc.bottom;
-        GetClientRect(hwnd, &rc);
-        rc.top = S(hwnd, 78);
+        /* 查询区底色和列表底色太接近，压一条分隔线把两块分层 */
+        rc.top = band - 1;
+        rc.bottom = band;
+        FillRect((HDC)wp, &rc, g_hQueryLineBrush);
+        rc.top = band;
+        rc.bottom = clientH;
         FillRect((HDC)wp, &rc, GetSysColorBrush(COLOR_WINDOW));
         return 1;
     }
@@ -2402,6 +2598,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_hFont) DeleteObject(g_hFont);
         g_hFont = CreateUIFont(HIWORD(wp));
         EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_hFont);
+        ApplyRowHeight(hwnd);
         SetWindowPos(hwnd, NULL, suggested->left, suggested->top,
                      suggested->right - suggested->left, suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2721,7 +2918,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_all = NULL;
         g_view = NULL;
         if (g_hFont) DeleteObject(g_hFont);
+        if (g_hRowSpacer) { ImageList_Destroy(g_hRowSpacer); g_hRowSpacer = NULL; }
         if (g_hQueryBrush) { DeleteObject(g_hQueryBrush); g_hQueryBrush = NULL; }
+        if (g_hQueryLineBrush) { DeleteObject(g_hQueryLineBrush); g_hQueryLineBrush = NULL; }
         PostQuitMessage(0);
         return 0;
     }
@@ -2740,6 +2939,7 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     UINT dpi;
 
     g_hInst = hInst;
+    LoadLanguagePreference();
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
