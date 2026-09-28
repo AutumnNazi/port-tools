@@ -43,25 +43,6 @@ static int VecPush(PORT_VEC *v, const PORT_ENTRY *e)
     return 1;
 }
 
-const WCHAR *PortsStateText(DWORD state)
-{
-    switch (state) {
-    case MIB_TCP_STATE_CLOSED:     return L"已关闭";
-    case MIB_TCP_STATE_LISTEN:     return L"监听";
-    case MIB_TCP_STATE_SYN_SENT:   return L"SYN 已发送";
-    case MIB_TCP_STATE_SYN_RCVD:   return L"SYN 已接收";
-    case MIB_TCP_STATE_ESTAB:      return L"已建立";
-    case MIB_TCP_STATE_FIN_WAIT1:  return L"FIN 等待 1";
-    case MIB_TCP_STATE_FIN_WAIT2:  return L"FIN 等待 2";
-    case MIB_TCP_STATE_CLOSE_WAIT: return L"关闭等待";
-    case MIB_TCP_STATE_CLOSING:    return L"正在关闭";
-    case MIB_TCP_STATE_LAST_ACK:   return L"最后确认";
-    case MIB_TCP_STATE_TIME_WAIT:  return L"时间等待";
-    case MIB_TCP_STATE_DELETE_TCB: return L"已删除";
-    default:                       return L"未知";
-    }
-}
-
 static void FmtAddr(int family, void *addr, DWORD scope, WCHAR *buf, size_t cch)
 {
     WCHAR tmp[64];
@@ -253,7 +234,7 @@ static BOOL AddTcp4(PORT_VEC *v, const PROC_INFO *procs, size_t procCount,
             e.remotePort = ntohs((u_short)row->dwRemotePort);
         }
 
-        wcsncpy(e.state, PortsStateText(row->dwState), 23);
+        e.stateCode = row->dwState;
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount, cache);
 
@@ -297,7 +278,7 @@ static BOOL AddTcp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount,
             e.remotePort = ntohs((u_short)row->dwRemotePort);
         }
 
-        wcsncpy(e.state, PortsStateText(row->dwState), 23);
+        e.stateCode = row->dwState;
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount, cache);
 
@@ -337,7 +318,7 @@ static BOOL AddUdp4(PORT_VEC *v, const PROC_INFO *procs, size_t procCount,
         e.localPort = ntohs((u_short)row->dwLocalPort);
         e.remoteAddr[0] = 0;
         e.remotePort = 0;
-        e.state[0] = 0;
+        e.stateCode = 0;
 
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount, cache);
@@ -376,7 +357,7 @@ static BOOL AddUdp6(PORT_VEC *v, const PROC_INFO *procs, size_t procCount,
         e.localPort = ntohs((u_short)row->dwLocalPort);
         e.remoteAddr[0] = 0;
         e.remotePort = 0;
-        e.state[0] = 0;
+        e.stateCode = 0;
 
         e.pid = row->dwOwningPid;
         ResolveProc(&e, procs, procCount, cache);

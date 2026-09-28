@@ -1,88 +1,93 @@
-# PortView — Windows 端口占用查看器
+# PortView — Windows Port Inspector
 
-一个轻量的 Windows 原生端口工具：**查看每个端口被谁占用 → 定位关联文件 → 结束进程**。
+**English** | [简体中文](README_zh.md)
 
-- 纯 C + Win32 API，无任何运行时依赖（静态链接 CRT，单文件 exe，约 100 KB）
-- 不需要安装，下载即用，支持 Windows 7 ~ Windows 11（x64 / x86）
-- 支持 TCP / UDP、IPv4 / IPv6 全量连接与监听端口
+A lightweight native Windows port tool: **find out what holds each port → locate the related files → kill the process**.
 
-## 下载
+- Pure C + Win32 API, no runtime dependencies (statically linked CRT, single exe, ~100 KB)
+- No installation, download and run; supports Windows 7 ~ Windows 11 (x64 / x86)
+- Full TCP / UDP, IPv4 / IPv6 connections and listening ports
+- The interface starts in English and switches to 中文 from the **Language** menu at any time, no restart needed
 
-项目处于开发阶段，目前提供一个**滚动更新的 dev 预发布**：每次推送到 `main` 分支会自动重新构建，并覆盖 Release 里同名的最新产物。
+## Download
 
-👉 下载入口：[Releases → dev](../../releases/tag/dev)
+The project is under active development. Right now there is a single **rolling dev prerelease**: every push to the `main` branch rebuilds the app and overwrites the latest artifacts of the same name in the Release.
 
-| 文件 | 适用 |
+👉 Download: [Releases → dev](../../releases/tag/dev)
+
+| File | For |
 | --- | --- |
-| `PortView-Windows-x64-dev.exe` | 64 位 Windows（Win7 ~ Win11，绝大多数电脑选这个） |
-| `PortView-Windows-x86-dev.exe` | 32 位 Windows（老机器） |
+| `PortView-Windows-x64-dev.exe` | 64-bit Windows (Win7 ~ Win11, the right choice for almost every machine) |
+| `PortView-Windows-x86-dev.exe` | 32-bit Windows (older machines) |
 
-单文件、免安装，双击运行即可；要查看或结束系统级进程请右键「以管理员身份运行」。
+Single file, no installer — just double-click. To inspect or end system-level processes, right-click the exe and choose "Run as administrator".
 
-需要正式版本时，打 `v*` 标签推送即可触发正式 Release（文件名不带 `-dev`）：
+When you want a formal release, tag a `v*` version and push it; that triggers a proper Release (file names without the `-dev` suffix):
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-## 功能
+## Features
 
-| 功能 | 说明 |
+| Feature | Description |
 | --- | --- |
-| 端口列表 | 协议、本地/远程地址与端口、连接状态、PID、进程名、映像路径 |
-| 过滤 | 工具栏提供四个条件：本地端口、PID、进程名、综合关键字。前三个分别只匹配对应字段，综合关键字继续匹配地址、路径、状态等所有字段；多个条件同时填写时必须全部符合。`Ctrl+F` 聚焦综合关键字框 |
-| 精确匹配 | 菜单栏「筛选」勾选后，搜索内容必须与端口、PID、协议、状态、地址、进程名或文件名完全相同。例如搜索 `80` 只保留端口 80，不再带出 8000、8080 或路径中包含 80 的记录。默认关闭 |
-| 筛选菜单 | 菜单栏「筛选」集中放所有结构化条件：四个勾选项（自动刷新 / 仅监听端口 / 隐藏系统端口 / 精确匹配）、协议子菜单（全部 / TCP / UDP / IPv4 / IPv6）、以及「清除全部筛选」。勾选状态实时显示在菜单左侧，底部状态栏同步提示当前生效的条件 |
-| 仅监听端口 | 菜单栏「筛选」勾选后只保留处于监听状态的端口，滤掉大量已建立的连接噪声 |
-| 隐藏系统端口 | 菜单栏「筛选」勾选后滤掉 System、csrss、winlogon、services、lsass、svchost 等系统关键进程占用的端口（这类进程结束会危及系统稳定性）。默认关闭 |
-| 排序 | 点击列头排序，再次点击反转 |
-| 自动刷新 | 菜单栏「筛选」勾选（`Ctrl+Shift+R` 切换），每 3 秒刷新一次（保持选中项不跳） |
-| 进程详情 | 双击任意行：显示映像路径、完整命令行、该进程加载的全部模块（DLL/关联文件） |
-| 打开文件位置 | 右键 → “打开文件所在位置”，直接在资源管理器中定位并选中该文件；模块列表双击同理 |
-| 结束进程 | 右键 → “结束进程” / “结束进程树”（含全部子进程，先子后父），带二次确认 |
-| 提权 | 状态栏显示当前权限；点 “以管理员身份重启” 可一键提权以处理系统级进程 |
-| 复制 | 复制映像路径、PID 或整行信息 |
+| Port list | Protocol, local and remote address/port, connection state, PID, process name, image path |
+| Filtering | The query row offers four conditions: local port, PID, process name, and a general keyword. The first three match only their own field, while the keyword keeps matching across addresses, paths, states and every other field; conditions you fill in together are combined with AND. `Ctrl+F` focuses the keyword box |
+| Exact match | When checked in the **Filter** menu, the search text must equal a port, PID, protocol, state, address, process name or file name in full. For example, searching `80` keeps only port 80 and no longer pulls in 8000, 8080, or records whose path contains 80. Off by default |
+| Filter menu | The **Filter** menu holds every structured condition: four check items (Auto Refresh / Listening Only / Hide System Ports / Exact Match), the Protocol submenu (All / TCP / UDP / IPv4 / IPv6), and "Clear All Filters". Check marks are shown in the menu itself, and the status bar at the bottom lists the conditions currently in effect |
+| Language menu | The **Language** menu switches the whole interface between English and 中文 (English by default). Menus, column headers, the query row, the status bar, hints and message boxes all change, and the list you are looking at is repainted and re-sorted in the new language immediately — no restart |
+| Listening only | When checked in the **Filter** menu, only ports in the listening state are kept, filtering out the noise of established connections |
+| Hide system ports | When checked in the **Filter** menu, ports held by key system processes are dropped — System, csrss, winlogon, services, lsass, svchost and friends (ending these would threaten system stability). Off by default |
+| Sorting | Click a column header to sort, click again to reverse |
+| Auto refresh | Checked in the **Filter** menu (toggle with `Ctrl+Shift+R`), refreshes every 3 seconds while keeping your selection in place |
+| Process details | Double-click any row: shows the image path, the full command line, and every module (DLL / related file) the process has loaded |
+| Open file location | Right-click → "Open File Location" to reveal and select the file in Explorer; double-clicking a module row does the same |
+| Kill process | Right-click → "Kill Process" / "Kill Process Tree" (all child processes, children first), with a confirmation step |
+| Elevation | The status bar shows the current privilege level; clicking it restarts the app elevated so you can handle system-level processes |
+| Copy | Copy the image path, the PID, or the whole row |
 
-快捷键：`F5` 刷新，`Ctrl+F` 定位过滤框，`Ctrl+Shift+R` 切换自动刷新，`Esc` 清除全部筛选，`Alt+F` 打开筛选菜单，双击查看详情，右键菜单。
+Shortcuts: `F5` refresh, `Ctrl+F` focus the filter box, `Ctrl+Shift+R` toggle auto refresh, `Esc` clear all filters, `Alt+F` open the Filter menu, `Alt+L` open the Language menu, double-click for details, right-click for the context menu.
 
-## 为什么需要管理员权限？
+## Why does it need administrator rights?
 
-- 普通权限：可查看本机所有连接与对应 PID、进程名，能结束自己的进程。
-- 管理员权限：可读取系统/其它用户进程的完整路径、命令行与模块列表，并结束它们。
+- Standard user: you can see every connection on the machine with its PID and process name, and end the processes you own.
+- Administrator: you can also read the full path, command line and module list of system and other users' processes, and end them.
 
-程序默认以普通权限启动（`asInvoker`），需要时点右上角的 “以管理员身份重启”，不会每次弹 UAC。
+The program starts as a standard user (`asInvoker`) and only elevates when you ask it to, so there is no UAC prompt on every launch.
 
-## 本地编译
+## Building locally
 
-需要 Visual Studio（MSVC）与 Windows SDK：
+Requires Visual Studio (MSVC) and the Windows SDK:
 
 ```bat
-rem 在 “x64 Native Tools Command Prompt for VS” 中执行
-build.bat        :: 编译 x64
-build.bat x86    :: 编译 x86
+rem run this in the "x64 Native Tools Command Prompt for VS"
+build.bat        :: build x64
+build.bat x86    :: build x86
 ```
 
-产物在 `build\PortView.exe`。CI 使用 GitHub Actions（`windows-latest` + MSVC）编译并发布，
-推送 `v*` 标签即自动创建 Release 并上传 x64/x86 两个 exe。
+The result is `build\PortView.exe`. CI builds and publishes with GitHub Actions (`windows-latest` + MSVC);
+pushing a `v*` tag creates the Release and uploads both the x64 and x86 exe.
 
-## 代码结构
+## Project layout
 
 ```
 src/
-  portview.h   公共结构与接口
-  main.c       入口（公共控件初始化、SeDebugPrivilege、消息循环）
-  ports.c      GetExtendedTcpTable/UdpTable 枚举端口，解析占用进程
-  proc.c       进程快照、映像路径、命令行（PEB）、模块枚举、结束进程/进程树、UAC 提权
-  ui.c         主窗口（列表/过滤/排序/菜单）与进程详情窗口
-  app.rc       版本信息与清单（ComCtl32 v6、Per-Monitor DPI）
+  portview.h   shared structures and interfaces
+  main.c       entry point (common controls, SeDebugPrivilege, message loop)
+  ports.c      enumerate ports via GetExtendedTcpTable/UdpTable, resolve the owning process
+  proc.c       process snapshot, image path, command line (PEB), module list, kill process/tree, UAC elevation
+  ui.c         main window (list / filtering / sorting / menus), process details window, and the EN/ZH text table
+  app.rc       version info and manifest (ComCtl32 v6, Per-Monitor DPI)
 ```
 
-实现要点：
-- 端口数据来自 `GetExtendedTcpTable` / `GetExtendedUdpTable`（含 PID），进程名来自 Toolhelp 快照，映像路径来自 `QueryFullProcessImageNameW`，并按 PID 缓存，避免重复 `OpenProcess`。
-- 命令行通过 `NtQueryInformationProcess` 读取目标进程 PEB 的 `ProcessParameters.CommandLine`，自动适配 WOW64（32 位进程读 32 位 PEB）。
-- 关联文件通过 `EnumProcessModulesEx(LIST_MODULES_ALL)` 获取进程加载的所有模块。
-- 高 DPI 使用 `GetDpiForWindow` + `SystemParametersInfoForDpi` 动态缩放字体与布局，并响应 `WM_DPICHANGED`。
+Implementation notes:
+- Port data comes from `GetExtendedTcpTable` / `GetExtendedUdpTable` (which include the PID), process names from a Toolhelp snapshot, image paths from `QueryFullProcessImageNameW`, cached by PID so the same process is not opened over and over.
+- The command line is read with `NtQueryInformationProcess` from the target's PEB (`ProcessParameters.CommandLine`), with WOW64 handled automatically (a 32-bit process is read through its 32-bit PEB).
+- Related files come from `EnumProcessModulesEx(LIST_MODULES_ALL)`, i.e. every module the process has loaded.
+- Connection state is carried as the raw kernel value and turned into text at render time, so switching language needs no re-enumeration.
+- High DPI uses `GetDpiForWindow` + `SystemParametersInfoForDpi` to scale fonts and layout, and responds to `WM_DPICHANGED`.
 
-## 许可
+## License
 
 MIT

@@ -18,7 +18,8 @@ typedef struct {
     DWORD localPort;
     WCHAR remoteAddr[64];
     DWORD remotePort;
-    WCHAR state[24];             /* 监听 / 已建立 / ... UDP 为空 */
+    /* MIB_TCP_STATE_* 原值；UDP 无连接状态，置 0。文字由界面按语言渲染 */
+    DWORD stateCode;
     DWORD pid;
     WCHAR procName[64];
     WCHAR procPath[MAX_PATH];
@@ -57,7 +58,6 @@ typedef struct {
 int  PortsEnumerate(PORT_ENTRY **entries, size_t *count);
 int  PortsEnumerateEx(PORT_ENTRY **entries, size_t *count, unsigned *tables);
 void PortsFree(PORT_ENTRY *entries);
-const WCHAR *PortsStateText(DWORD state);
 
 /* 结束进程的结果：界面要能区分「PID 已被复用」这种危险情况和普通的权限失败 */
 typedef enum {

@@ -26,7 +26,6 @@
 #define ID_LBL_NAME    1023
 #define ID_LBL_KEY     1024
 #define ID_BTN_REFRESH 1002
-#define ID_BTN_FILTER  1017
 #define ID_CHK_AUTO    1003
 #define ID_BTN_ADMIN   1004
 #define ID_LIST        1005
@@ -55,6 +54,8 @@
 #define IDM_LISTEN     2021
 #define IDM_HIDESYS    2022
 #define IDM_EXACT      2023   /* 搜索框按完整字段匹配，而不是包含匹配 */
+#define IDM_LANG_EN    2040   /* 界面语言：英文 */
+#define IDM_LANG_ZH    2041   /* 界面语言：中文 */
 #define IDM_PROTO_ALL  2030
 #define IDM_PROTO_TCP  2031
 #define IDM_PROTO_UDP  2032
@@ -85,26 +86,282 @@
 
 #define FILTER_DEBOUNCE_MS 180
 
+/*
+ * 界面文案表。索引只用来定位，两条文案按 [TXT_x] 指定初始化写下标，
+ * 增删条目不会互相错位；漏写的条目为 NULL，由 Tr 兜底成空串。
+ */
+enum {
+    /* 菜单栏与「筛选」菜单 */
+    TXT_FILTER = 0, TXT_LANGUAGE,
+    TXT_AUTO, TXT_LISTEN, TXT_HIDE_SYSTEM, TXT_EXACT, TXT_CLEAR,
+    TXT_PROTOCOL, TXT_PROTO_ALL, TXT_PROTO_TCP, TXT_PROTO_UDP, TXT_PROTO_V4, TXT_PROTO_V6,
+    /* 查询区 */
+    TXT_PORT, TXT_PID, TXT_PROCESS, TXT_KEYWORD, TXT_REFRESH,
+    TXT_CUE_PORT, TXT_CUE_PID, TXT_CUE_NAME, TXT_CUE_KEY,
+    /* 窗口标题与列表列头 */
+    TXT_WINDOW, TXT_DETAIL_TITLE,
+    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_LPORT, TXT_COL_RADDR, TXT_COL_RPORT,
+    TXT_COL_STATE, TXT_COL_PID, TXT_COL_NAME, TXT_COL_PATH,
+    /* 连接状态 */
+    TXT_STATE_CLOSED, TXT_STATE_LISTEN, TXT_STATE_SYN_SENT, TXT_STATE_SYN_RCVD,
+    TXT_STATE_ESTAB, TXT_STATE_FIN1, TXT_STATE_FIN2, TXT_STATE_CLOSE_WAIT,
+    TXT_STATE_CLOSING, TXT_STATE_LAST_ACK, TXT_STATE_TIME_WAIT, TXT_STATE_DELETED,
+    TXT_STATE_UNKNOWN,
+    /* 状态栏 */
+    TXT_BAR_LOADING, TXT_BAR_FAILED, TXT_BAR_SUMMARY, TXT_BAR_PARTIAL, TXT_BAR_REFRESHING,
+    TXT_BAR_KILLING, TXT_BAR_ADMIN, TXT_BAR_STD_USER,
+    TXT_COND_TCP, TXT_COND_UDP, TXT_COND_V4, TXT_COND_V6,
+    TXT_COND_LISTEN, TXT_COND_HIDEP, TXT_COND_EXACT, TXT_COND_AUTO,
+    /* 空结果提示 */
+    TXT_EMPTY_LOADING, TXT_EMPTY_FAILED, TXT_EMPTY_NONE, TXT_EMPTY_HIDEP,
+    TXT_EMPTY_EXACT, TXT_EMPTY_FILTER, TXT_EMPTY_NOMATCH,
+    /* 右键菜单 */
+    TXT_CTX_DETAIL, TXT_CTX_OPEN_LOC, TXT_CTX_KILL, TXT_CTX_KILL_TREE,
+    TXT_CTX_COPY_PATH, TXT_CTX_COPY_PID, TXT_CTX_COPY_ROW, TXT_CTX_FILTER_SEL, TXT_CTX_REFRESH,
+    /* 底部详情栏 */
+    TXT_INFO_NONE, TXT_INFO_UNKNOWN_PROC, TXT_INFO_LINE, TXT_INFO_NOPATH,
+    /* 消息框 */
+    TXT_MB_ELEVATE_BODY, TXT_MB_ELEVATE_TITLE, TXT_MB_ELEVATE_FAIL, TXT_MB_HINT,
+    TXT_MB_KILL_BUSY, TXT_MB_WAIT, TXT_MB_OOM, TXT_MB_FAIL, TXT_MB_START_FAIL,
+    TXT_MB_REUSED_BODY, TXT_MB_ABORTED, TXT_MB_PARTIAL_BODY, TXT_MB_PARTIAL_TITLE,
+    TXT_MB_SELF_BODY, TXT_MB_KILL_ERR, TXT_MB_SYS_PROC, TXT_MB_CANNOT_KILL,
+    TXT_MB_IDENTITY_BODY, TXT_MB_NOT_KILLED, TXT_MB_KILL_TITLE, TXT_MB_KILL_TREE_TITLE,
+    TXT_MB_KILL_CONFIRM, TXT_MB_KILL_TREE_CONFIRM, TXT_MB_NO_LOCATION, TXT_MB_NO_PATH,
+    TXT_MB_NO_MOD_LOC, TXT_MB_OPEN_LOC_FAIL, TXT_MB_NO_MODULES,
+    /* 进程详情窗口 */
+    TXT_D_PATH_LABEL, TXT_D_CMD_LABEL, TXT_D_MOD_LABEL,
+    TXT_D_BTN_LOC, TXT_D_BTN_KILL, TXT_D_BTN_RELOAD, TXT_D_BTN_CLOSE,
+    TXT_D_COL_MODULE, TXT_D_COL_PATH, TXT_D_COL_BASE, TXT_D_COL_SIZE,
+    TXT_D_LOADING, TXT_D_UNAVAIL, TXT_D_STALE,
+    TXT_COUNT
+};
+
+/* 1=英文（默认），0=中文 */
+static int g_english = 1;
+
+static const WCHAR *const TEXT_EN[TXT_COUNT] = {
+    [TXT_FILTER] = L"&Filter", [TXT_LANGUAGE] = L"&Language",
+    [TXT_AUTO] = L"&Auto Refresh\tCtrl+Shift+R", [TXT_LISTEN] = L"&Listening Only",
+    [TXT_HIDE_SYSTEM] = L"&Hide System Ports", [TXT_EXACT] = L"&Exact Match",
+    [TXT_CLEAR] = L"&Clear All Filters\tEsc", [TXT_PROTOCOL] = L"&Protocol",
+    [TXT_PROTO_ALL] = L"&All Protocols", [TXT_PROTO_TCP] = L"&TCP Only",
+    [TXT_PROTO_UDP] = L"&UDP Only", [TXT_PROTO_V4] = L"IPv&4 Only",
+    [TXT_PROTO_V6] = L"IPv&6 Only",
+    [TXT_PORT] = L"Port", [TXT_PID] = L"PID", [TXT_PROCESS] = L"Process",
+    [TXT_KEYWORD] = L"Keyword", [TXT_REFRESH] = L"Refresh (F5)",
+    [TXT_CUE_PORT] = L"80", [TXT_CUE_PID] = L"1234", [TXT_CUE_NAME] = L"nginx.exe",
+    [TXT_CUE_KEY] = L"Address, path or state",
+    [TXT_WINDOW] = L"PortView — Port Inspector", [TXT_DETAIL_TITLE] = L"Process Details",
+    [TXT_COL_PROTO] = L"Protocol", [TXT_COL_LADDR] = L"Local Address",
+    [TXT_COL_LPORT] = L"Local Port", [TXT_COL_RADDR] = L"Remote Address",
+    [TXT_COL_RPORT] = L"Remote Port", [TXT_COL_STATE] = L"State", [TXT_COL_PID] = L"PID",
+    [TXT_COL_NAME] = L"Process", [TXT_COL_PATH] = L"Image Path",
+    [TXT_STATE_CLOSED] = L"Closed", [TXT_STATE_LISTEN] = L"Listening",
+    [TXT_STATE_SYN_SENT] = L"SYN Sent", [TXT_STATE_SYN_RCVD] = L"SYN Received",
+    [TXT_STATE_ESTAB] = L"Established", [TXT_STATE_FIN1] = L"FIN Wait 1",
+    [TXT_STATE_FIN2] = L"FIN Wait 2", [TXT_STATE_CLOSE_WAIT] = L"Close Wait",
+    [TXT_STATE_CLOSING] = L"Closing", [TXT_STATE_LAST_ACK] = L"Last Ack",
+    [TXT_STATE_TIME_WAIT] = L"Time Wait", [TXT_STATE_DELETED] = L"Deleted",
+    [TXT_STATE_UNKNOWN] = L"Unknown",
+    [TXT_BAR_LOADING] = L"Reading port tables… · %s",
+    [TXT_BAR_FAILED] = L"Failed to read port tables · showing the previous result · %02d:%02d:%02d",
+    [TXT_BAR_SUMMARY] = L"%s%s%u connections · %u listening · %u shown · %s%02d:%02d:%02d",
+    [TXT_BAR_PARTIAL] = L"Partial results · ", [TXT_BAR_REFRESHING] = L"Refreshing · ",
+    [TXT_BAR_KILLING] = L"Killing process…", [TXT_BAR_ADMIN] = L"Administrator",
+    [TXT_BAR_STD_USER] = L"Standard user · click to elevate",
+    [TXT_COND_TCP] = L"TCP only · ", [TXT_COND_UDP] = L"UDP only · ",
+    [TXT_COND_V4] = L"IPv4 only · ", [TXT_COND_V6] = L"IPv6 only · ",
+    [TXT_COND_LISTEN] = L"Listening only · ", [TXT_COND_HIDEP] = L"System ports hidden · ",
+    [TXT_COND_EXACT] = L"Exact match · ", [TXT_COND_AUTO] = L"Auto refresh · ",
+    [TXT_EMPTY_LOADING] = L"Reading port tables…",
+    [TXT_EMPTY_FAILED] = L"Failed to read the port tables\nShowing the last successful result",
+    [TXT_EMPTY_NONE] = L"No ports are currently in use",
+    [TXT_EMPTY_HIDEP] = L"No ports match the current conditions\n"
+                        L"Ports held by key system processes are hidden\n"
+                        L"Try turning off \"Hide System Ports\"",
+    [TXT_EMPTY_EXACT] = L"No port, PID, process or address exactly matches what you typed\n"
+                        L"Try turning off \"Exact Match\" to search for partial text",
+    [TXT_EMPTY_FILTER] = L"No ports match the current filters\n"
+                         L"Try turning off \"Listening Only\" or switching protocol",
+    [TXT_EMPTY_NOMATCH] = L"No matching ports\nTry clearing the filter box",
+    [TXT_CTX_DETAIL] = L"&View Process Details", [TXT_CTX_OPEN_LOC] = L"&Open File Location",
+    [TXT_CTX_KILL] = L"&Kill Process", [TXT_CTX_KILL_TREE] = L"Kill Process &Tree",
+    [TXT_CTX_COPY_PATH] = L"&Copy Image Path", [TXT_CTX_COPY_PID] = L"Copy &PID",
+    [TXT_CTX_COPY_ROW] = L"Copy &Row", [TXT_CTX_FILTER_SEL] = L"Filter by This &Process",
+    [TXT_CTX_REFRESH] = L"&Refresh\tF5",
+    [TXT_INFO_NONE] = L"  Select a row to see what holds the port",
+    [TXT_INFO_UNKNOWN_PROC] = L"(unknown process)",
+    [TXT_INFO_LINE] = L" %s  PID %u  %s",
+    [TXT_INFO_NOPATH] = L" %s  PID %u  (image path unavailable, may need administrator)",
+    [TXT_MB_ELEVATE_BODY] = L"Running as administrator lets you inspect and end system-level processes.\nContinue?",
+    [TXT_MB_ELEVATE_TITLE] = L"Elevation",
+    [TXT_MB_ELEVATE_FAIL] = L"Elevation failed or was cancelled.",
+    [TXT_MB_HINT] = L"Notice",
+    [TXT_MB_KILL_BUSY] = L"The previous kill operation is still running. Please wait.",
+    [TXT_MB_WAIT] = L"Please wait",
+    [TXT_MB_OOM] = L"Not enough memory to start the kill operation.",
+    [TXT_MB_FAIL] = L"Failed",
+    [TXT_MB_START_FAIL] = L"Unable to start the kill operation.",
+    [TXT_MB_REUSED_BODY] = L"That PID no longer belongs to the process you selected "
+                           L"(it exited and the PID was reassigned).\n"
+                           L"The kill was skipped so an unrelated process is not terminated by mistake.\n"
+                           L"Check the process in the list and try again.",
+    [TXT_MB_ABORTED] = L"Aborted",
+    [TXT_MB_PARTIAL_BODY] = L"The process tree was handled, but some members were not killed: "
+                            L"they may have exited or had their PID reused,\n"
+                            L"or permission was insufficient — a process whose creation time "
+                            L"cannot be read cannot be confirmed as part of the tree, so it was skipped.",
+    [TXT_MB_PARTIAL_TITLE] = L"Partially done",
+    [TXT_MB_SELF_BODY] = L"The scope includes this tool itself (you selected it, or it sits in that\n"
+                         L"process tree — for example this tool was started from the command line\n"
+                         L"you are killing).\n"
+                         L"Nothing was run so the tool does not disappear mid-operation.",
+    [TXT_MB_KILL_ERR] = L"Kill failed (error %u).\nIf the target is a system or another user's process, run this tool as administrator.",
+    [TXT_MB_SYS_PROC] = L"This system process cannot be ended.",
+    [TXT_MB_CANNOT_KILL] = L"Cannot kill",
+    [TXT_MB_IDENTITY_BODY] = L"The identity of this process could not be confirmed: it may have exited,\n"
+                             L"or permission was insufficient to read its start time.\n"
+                             L"The operation was cancelled so a process that reused this PID is kept safe.",
+    [TXT_MB_NOT_KILLED] = L"Not killed",
+    [TXT_MB_KILL_TITLE] = L"Kill Process", [TXT_MB_KILL_TREE_TITLE] = L"Kill Process Tree",
+    [TXT_MB_KILL_CONFIRM] = L"Kill process %s (PID %u)?\nUnsaved data will be lost.",
+    [TXT_MB_KILL_TREE_CONFIRM] = L"Kill process %s (PID %u) and all of its child processes?\nUnsaved data will be lost.",
+    [TXT_MB_NO_LOCATION] = L"Unable to open that location.",
+    [TXT_MB_NO_PATH] = L"The image path of this process is unavailable (insufficient permission).",
+    [TXT_MB_NO_MOD_LOC] = L"Unable to open that module's location.",
+    [TXT_MB_OPEN_LOC_FAIL] = L"File location unavailable (process path unknown or permission denied).",
+    [TXT_MB_NO_MODULES] = L"Unable to read the module list (needs higher permission, or the process has exited)",
+    [TXT_D_PATH_LABEL] = L"Image path:", [TXT_D_CMD_LABEL] = L"Command line:",
+    [TXT_D_MOD_LABEL] = L"Loaded modules (related files):",
+    [TXT_D_BTN_LOC] = L"Open Location", [TXT_D_BTN_KILL] = L"Kill Process",
+    [TXT_D_BTN_RELOAD] = L"Reload", [TXT_D_BTN_CLOSE] = L"Close",
+    [TXT_D_COL_MODULE] = L"Module", [TXT_D_COL_PATH] = L"File Path",
+    [TXT_D_COL_BASE] = L"Base", [TXT_D_COL_SIZE] = L"Size",
+    [TXT_D_LOADING] = L"Reading…", [TXT_D_UNAVAIL] = L"(unavailable)",
+    [TXT_D_STALE] = L"(the original process exited or its PID was reused; its data was not refreshed)",
+};
+
+static const WCHAR *const TEXT_ZH[TXT_COUNT] = {
+    [TXT_FILTER] = L"筛选(&F)", [TXT_LANGUAGE] = L"语言(&L)",
+    [TXT_AUTO] = L"自动刷新(&A)\tCtrl+Shift+R", [TXT_LISTEN] = L"仅监听端口(&L)",
+    [TXT_HIDE_SYSTEM] = L"隐藏系统端口(&S)", [TXT_EXACT] = L"精确匹配(&X)",
+    [TXT_CLEAR] = L"清除全部筛选(&C)\tEsc", [TXT_PROTOCOL] = L"协议(&P)",
+    [TXT_PROTO_ALL] = L"全部协议(&A)", [TXT_PROTO_TCP] = L"仅 TCP(&T)",
+    [TXT_PROTO_UDP] = L"仅 UDP(&U)", [TXT_PROTO_V4] = L"仅 IPv4(&4)",
+    [TXT_PROTO_V6] = L"仅 IPv6(&6)",
+    [TXT_PORT] = L"端口", [TXT_PID] = L"PID", [TXT_PROCESS] = L"进程名",
+    [TXT_KEYWORD] = L"关键字", [TXT_REFRESH] = L"刷新 (F5)",
+    [TXT_CUE_PORT] = L"80", [TXT_CUE_PID] = L"1234", [TXT_CUE_NAME] = L"nginx.exe",
+    [TXT_CUE_KEY] = L"地址、路径或状态",
+    [TXT_WINDOW] = L"端口占用查看器 — PortView", [TXT_DETAIL_TITLE] = L"进程详情",
+    [TXT_COL_PROTO] = L"协议", [TXT_COL_LADDR] = L"本地地址", [TXT_COL_LPORT] = L"本地端口",
+    [TXT_COL_RADDR] = L"远程地址", [TXT_COL_RPORT] = L"远程端口", [TXT_COL_STATE] = L"状态",
+    [TXT_COL_PID] = L"PID", [TXT_COL_NAME] = L"进程", [TXT_COL_PATH] = L"映像路径",
+    [TXT_STATE_CLOSED] = L"已关闭", [TXT_STATE_LISTEN] = L"监听",
+    [TXT_STATE_SYN_SENT] = L"SYN 已发送", [TXT_STATE_SYN_RCVD] = L"SYN 已接收",
+    [TXT_STATE_ESTAB] = L"已建立", [TXT_STATE_FIN1] = L"FIN 等待 1",
+    [TXT_STATE_FIN2] = L"FIN 等待 2", [TXT_STATE_CLOSE_WAIT] = L"关闭等待",
+    [TXT_STATE_CLOSING] = L"正在关闭", [TXT_STATE_LAST_ACK] = L"最后确认",
+    [TXT_STATE_TIME_WAIT] = L"时间等待", [TXT_STATE_DELETED] = L"已删除",
+    [TXT_STATE_UNKNOWN] = L"未知",
+    [TXT_BAR_LOADING] = L"正在读取端口表… · %s",
+    [TXT_BAR_FAILED] = L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
+    [TXT_BAR_SUMMARY] = L"%s%s共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
+    [TXT_BAR_PARTIAL] = L"部分结果 · ", [TXT_BAR_REFRESHING] = L"正在刷新 · ",
+    [TXT_BAR_KILLING] = L"正在结束进程…", [TXT_BAR_ADMIN] = L"管理员",
+    [TXT_BAR_STD_USER] = L"标准用户 · 点击提权",
+    [TXT_COND_TCP] = L"仅 TCP · ", [TXT_COND_UDP] = L"仅 UDP · ",
+    [TXT_COND_V4] = L"仅 IPv4 · ", [TXT_COND_V6] = L"仅 IPv6 · ",
+    [TXT_COND_LISTEN] = L"仅监听 · ", [TXT_COND_HIDEP] = L"已隐藏系统端口 · ",
+    [TXT_COND_EXACT] = L"精确匹配 · ", [TXT_COND_AUTO] = L"自动刷新 · ",
+    [TXT_EMPTY_LOADING] = L"正在读取端口表…",
+    [TXT_EMPTY_FAILED] = L"读取端口表失败\n显示的是上一次成功读取的结果",
+    [TXT_EMPTY_NONE] = L"当前没有检测到端口占用",
+    [TXT_EMPTY_HIDEP] = L"没有符合当前条件的端口\n当前已隐藏系统关键进程占用的端口\n试试取消「隐藏系统端口」",
+    [TXT_EMPTY_EXACT] = L"没有与搜索内容完全相同的端口、PID、进程名或地址\n可取消「精确匹配」改回包含搜索",
+    [TXT_EMPTY_FILTER] = L"没有符合当前筛选条件的端口\n试试取消「仅监听端口」或切换协议",
+    [TXT_EMPTY_NOMATCH] = L"没有匹配的端口\n试试清空筛选框",
+    [TXT_CTX_DETAIL] = L"查看进程详情(&D)", [TXT_CTX_OPEN_LOC] = L"打开文件所在位置(&O)",
+    [TXT_CTX_KILL] = L"结束进程(&K)", [TXT_CTX_KILL_TREE] = L"结束进程树(&T)",
+    [TXT_CTX_COPY_PATH] = L"复制映像路径(&C)", [TXT_CTX_COPY_PID] = L"复制 PID",
+    [TXT_CTX_COPY_ROW] = L"复制整行", [TXT_CTX_FILTER_SEL] = L"按该进程名过滤(&F)",
+    [TXT_CTX_REFRESH] = L"刷新(&R)\tF5",
+    [TXT_INFO_NONE] = L"　选中一行查看占用详情",
+    [TXT_INFO_UNKNOWN_PROC] = L"(未知进程)",
+    [TXT_INFO_LINE] = L"　%s　PID %u　%s",
+    [TXT_INFO_NOPATH] = L"　%s　PID %u　（映像路径不可用，可能需要管理员权限）",
+    [TXT_MB_ELEVATE_BODY] = L"以管理员身份重启后可以查看并结束系统级进程。\n是否继续？",
+    [TXT_MB_ELEVATE_TITLE] = L"提权",
+    [TXT_MB_ELEVATE_FAIL] = L"提权失败或已被取消。",
+    [TXT_MB_HINT] = L"提示",
+    [TXT_MB_KILL_BUSY] = L"上一次结束操作还在进行，请稍候。",
+    [TXT_MB_WAIT] = L"请稍候",
+    [TXT_MB_OOM] = L"内存不足，无法开始结束操作。",
+    [TXT_MB_FAIL] = L"失败",
+    [TXT_MB_START_FAIL] = L"无法开始结束操作。",
+    [TXT_MB_REUSED_BODY] = L"该 PID 已不是你选择的那个进程（原进程期间已退出，PID 被系统重新分配）。\n"
+                           L"为避免误杀无关进程，本次没有执行结束操作。\n请确认列表上的进程后再试。",
+    [TXT_MB_ABORTED] = L"已中止",
+    [TXT_MB_PARTIAL_BODY] = L"进程树已处理，但有部分成员没有结束：它们可能已经退出、PID 已被复用，\n"
+                            L"或权限不足——读不到创建时间的进程无法确认它是否属于这棵树，已跳过。",
+    [TXT_MB_PARTIAL_TITLE] = L"部分完成",
+    [TXT_MB_SELF_BODY] = L"要结束的范围里包含本工具自己（你选中的就是它，或者它在那棵进程树里，\n"
+                         L"例如本工具是从你要结束的那个命令行启动的）。\n"
+                         L"为避免操作进行到一半工具自己消失，本次没有执行。",
+    [TXT_MB_KILL_ERR] = L"结束失败（错误 %u）。\n如果是系统或其他用户的进程，请以管理员身份运行本工具。",
+    [TXT_MB_SYS_PROC] = L"该系统进程无法结束。",
+    [TXT_MB_CANNOT_KILL] = L"无法结束",
+    [TXT_MB_IDENTITY_BODY] = L"无法确认该进程的身份：它可能已经退出，也可能权限不足读不到它的启动时间。\n"
+                             L"为避免误杀已被系统复用了同一 PID 的其它进程，本次操作已取消。",
+    [TXT_MB_NOT_KILLED] = L"未能结束",
+    [TXT_MB_KILL_TITLE] = L"结束进程", [TXT_MB_KILL_TREE_TITLE] = L"结束进程树",
+    [TXT_MB_KILL_CONFIRM] = L"确定结束进程 %s（PID %u）吗？\n未保存的数据将丢失。",
+    [TXT_MB_KILL_TREE_CONFIRM] = L"确定结束进程 %s（PID %u）及其所有子进程吗？\n未保存的数据将丢失。",
+    [TXT_MB_NO_LOCATION] = L"无法打开该位置。",
+    [TXT_MB_NO_PATH] = L"该进程的映像路径不可用（权限不足）。",
+    [TXT_MB_NO_MOD_LOC] = L"无法打开该模块所在位置。",
+    [TXT_MB_OPEN_LOC_FAIL] = L"该文件位置不可用（进程路径未知或权限不足）。",
+    [TXT_MB_NO_MODULES] = L"无法读取模块列表（需要更高权限，或进程已退出）",
+    [TXT_D_PATH_LABEL] = L"映像路径：", [TXT_D_CMD_LABEL] = L"命令行：",
+    [TXT_D_MOD_LABEL] = L"已加载模块（关联文件）：",
+    [TXT_D_BTN_LOC] = L"打开所在目录", [TXT_D_BTN_KILL] = L"结束进程",
+    [TXT_D_BTN_RELOAD] = L"重新加载", [TXT_D_BTN_CLOSE] = L"关闭",
+    [TXT_D_COL_MODULE] = L"模块", [TXT_D_COL_PATH] = L"文件路径",
+    [TXT_D_COL_BASE] = L"基址", [TXT_D_COL_SIZE] = L"大小",
+    [TXT_D_LOADING] = L"正在读取…", [TXT_D_UNAVAIL] = L"（不可用）",
+    [TXT_D_STALE] = L"（原进程已退出或 PID 已被其它进程复用，未刷新它的数据）",
+};
+
+static const WCHAR *Tr(int id)
+{
+    const WCHAR *text;
+    if (id < 0 || id >= TXT_COUNT) return L"";
+    text = g_english ? TEXT_EN[id] : TEXT_ZH[id];
+    return text ? text : L"";
+}
+
 enum {
     COL_PROTO = 0, COL_LADDR, COL_LPORT, COL_RADDR,
     COL_RPORT, COL_STATE, COL_PID, COL_NAME, COL_PATH, COL_COUNT
-};
-
-static const WCHAR *COL_TITLES[COL_COUNT] = {
-    L"协议", L"本地地址", L"本地端口", L"远程地址", L"远程端口",
-    L"状态", L"PID", L"进程", L"映像路径"
 };
 
 /*
  * 列宽按信息量分配，不平均分。地址列在通配监听时只剩一个 *，却占着 140px；
  * 而映像路径是判断「谁占了端口」最该看的一列，反而被前面几列挤出可视区。
  * 路径列不写死宽度，由 LayoutColumns 把窗口剩下的宽度全给它。
+ * 端口列按英文列头（Remote Port）取宽，中文列头更短，不会被截。
  */
 static const int COL_WIDTHS[COL_COUNT] = {
-    56, 104, 76, 104, 76, 88, 64, 150, 240
+    56, 104, 76, 104, 88, 88, 64, 150, 240
 };
 
 #define COL_PATH_MIN 180   /* 路径列最小宽度，窗口再窄也不低于此 */
+
+/* 列头文案与 COL_* 一一对应，换语言时按列号取 */
+static const int COL_TEXT[COL_COUNT] = {
+    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_LPORT, TXT_COL_RADDR, TXT_COL_RPORT,
+    TXT_COL_STATE, TXT_COL_PID, TXT_COL_NAME, TXT_COL_PATH
+};
 
 static HINSTANCE g_hInst;
 static HWND g_hwndMain;
@@ -118,8 +375,6 @@ static HWND g_hLblPid;
 static HWND g_hLblName;
 static HWND g_hLblKey;
 static HWND g_hBtnRefresh;
-static HWND g_hBtnFilter;
-static HMENU g_filterMenu;
 static HBRUSH g_hQueryBrush;
 
 /* 系统默认把示例文字贴在文字区顶部。按当前字体高度把文字区收成居中的一条。 */
@@ -341,6 +596,35 @@ static const WCHAR *ShortAddr(const WCHAR *addr)
     return addr;
 }
 
+/*
+ * 连接状态文字。ports.c 只带内核原值，文案在这里按界面语言取，
+ * 切换语言后重绘列表即可，不必重新枚举端口表。
+ */
+static const WCHAR *StateText(DWORD code)
+{
+    switch (code) {
+    case MIB_TCP_STATE_CLOSED:     return Tr(TXT_STATE_CLOSED);
+    case MIB_TCP_STATE_LISTEN:     return Tr(TXT_STATE_LISTEN);
+    case MIB_TCP_STATE_SYN_SENT:   return Tr(TXT_STATE_SYN_SENT);
+    case MIB_TCP_STATE_SYN_RCVD:   return Tr(TXT_STATE_SYN_RCVD);
+    case MIB_TCP_STATE_ESTAB:      return Tr(TXT_STATE_ESTAB);
+    case MIB_TCP_STATE_FIN_WAIT1:  return Tr(TXT_STATE_FIN1);
+    case MIB_TCP_STATE_FIN_WAIT2:  return Tr(TXT_STATE_FIN2);
+    case MIB_TCP_STATE_CLOSE_WAIT: return Tr(TXT_STATE_CLOSE_WAIT);
+    case MIB_TCP_STATE_CLOSING:    return Tr(TXT_STATE_CLOSING);
+    case MIB_TCP_STATE_LAST_ACK:   return Tr(TXT_STATE_LAST_ACK);
+    case MIB_TCP_STATE_TIME_WAIT:  return Tr(TXT_STATE_TIME_WAIT);
+    case MIB_TCP_STATE_DELETE_TCB: return Tr(TXT_STATE_DELETED);
+    default:                       return Tr(TXT_STATE_UNKNOWN);
+    }
+}
+
+static const WCHAR *EntryStateText(const PORT_ENTRY *e)
+{
+    if (!e->stateCode) return L"";   /* UDP 没有连接状态 */
+    return StateText(e->stateCode);
+}
+
 /* LVS_OWNERDATA 下按需提供单元格文本，文本在 ports.c 枚举时已格式化好 */
 static const WCHAR *CellText(const PORT_ENTRY *e, int col)
 {
@@ -350,7 +634,7 @@ static const WCHAR *CellText(const PORT_ENTRY *e, int col)
     case COL_LPORT: return e->portText;
     case COL_RADDR: return ShortAddr(e->remoteAddr);
     case COL_RPORT: return e->rportText;
-    case COL_STATE: return e->state;
+    case COL_STATE: return EntryStateText(e);
     case COL_PID:   return e->pidText;
     case COL_NAME:  return e->procName;
     case COL_PATH:  return e->procPath;
@@ -360,16 +644,18 @@ static const WCHAR *CellText(const PORT_ENTRY *e, int col)
 
 /*
  * 状态文字配色，让连接状态一眼可辨：监听绿、已建立蓝、终态灰、中间态橙。
- * 空状态（UDP 行）返回 CLR_DEFAULT 走系统默认色。
+ * 按内核原值判断，与界面语言无关；空状态（UDP 行）返回 CLR_DEFAULT 走系统默认色。
  */
-static COLORREF StateTextColor(const WCHAR *state)
+static COLORREF StateTextColor(const PORT_ENTRY *e)
 {
-    if (!state || !state[0]) return CLR_DEFAULT;
-    if (_wcsicmp(state, L"监听") == 0) return RGB(16, 124, 16);
-    if (_wcsicmp(state, L"已建立") == 0) return RGB(0, 102, 204);
-    if (_wcsicmp(state, L"时间等待") == 0 || _wcsicmp(state, L"已关闭") == 0)
-        return RGB(130, 130, 130);
-    return RGB(200, 110, 0);   /* 关闭等待 / FIN / SYN / 正在关闭 等中间态 */
+    if (!e->stateCode) return CLR_DEFAULT;
+    switch (e->stateCode) {
+    case MIB_TCP_STATE_LISTEN:    return RGB(16, 124, 16);
+    case MIB_TCP_STATE_ESTAB:     return RGB(0, 102, 204);
+    case MIB_TCP_STATE_TIME_WAIT:
+    case MIB_TCP_STATE_CLOSED:    return RGB(130, 130, 130);
+    default:                      return RGB(200, 110, 0);  /* SYN / FIN / 关闭等待 等中间态 */
+    }
 }
 
 /*
@@ -432,7 +718,7 @@ static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
                EqualsI(e->portText, key) ||
                EqualsI(e->remoteAddr, key) ||
                EqualsI(e->rportText, key) ||
-               EqualsI(e->state, key) ||
+               EqualsI(EntryStateText(e), key) ||
                EqualsI(e->pidText, key) ||
                EqualsI(e->procName, key) ||
                EqualsI(PathBaseName(e->procPath), key);
@@ -443,7 +729,7 @@ static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
            ContainsI(e->portText, key) ||
            ContainsI(e->remoteAddr, key) ||
            ContainsI(e->rportText, key) ||
-           ContainsI(e->state, key) ||
+           ContainsI(EntryStateText(e), key) ||
            ContainsI(e->pidText, key) ||
            ContainsI(e->procName, key) ||
            ContainsI(e->procPath, key);
@@ -587,7 +873,7 @@ static int CmpEntry(const void *pa, const void *pb)
     case COL_LPORT: r = (int)a->localPort - (int)b->localPort; break;
     case COL_RADDR: r = CmpAddress(a->remoteAddr, b->remoteAddr); break;
     case COL_RPORT: r = (int)a->remotePort - (int)b->remotePort; break;
-    case COL_STATE: r = _wcsicmp(a->state, b->state); break;
+    case COL_STATE: r = _wcsicmp(EntryStateText(a), EntryStateText(b)); break;
     case COL_PID:   r = (int)a->pid - (int)b->pid; break;
     case COL_NAME:  r = _wcsicmp(a->procName, b->procName); break;
     case COL_PATH:  r = _wcsicmp(a->procPath, b->procPath); break;
@@ -611,26 +897,31 @@ static int CmpEntry(const void *pa, const void *pb)
  */
 static HMENU BuildMainMenu(void)
 {
-    HMENU bar, filter, proto;
+    HMENU bar, filter, proto, lang;
 
     filter = CreatePopupMenu();
-    AppendMenuW(filter, MF_STRING, IDM_AUTO, L"自动刷新(&A)\tCtrl+Shift+R");
-    AppendMenuW(filter, MF_STRING, IDM_LISTEN, L"仅监听端口(&L)");
-    AppendMenuW(filter, MF_STRING, IDM_HIDESYS, L"隐藏系统端口(&S)");
-    AppendMenuW(filter, MF_STRING, IDM_EXACT, L"精确匹配(&X)");
+    AppendMenuW(filter, MF_STRING, IDM_AUTO, Tr(TXT_AUTO));
+    AppendMenuW(filter, MF_STRING, IDM_LISTEN, Tr(TXT_LISTEN));
+    AppendMenuW(filter, MF_STRING, IDM_HIDESYS, Tr(TXT_HIDE_SYSTEM));
+    AppendMenuW(filter, MF_STRING, IDM_EXACT, Tr(TXT_EXACT));
     AppendMenuW(filter, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(filter, MF_STRING, IDM_CLEAR, L"清除全部筛选(&C)\tEsc");
+    AppendMenuW(filter, MF_STRING, IDM_CLEAR, Tr(TXT_CLEAR));
 
     proto = CreatePopupMenu();
-    AppendMenuW(proto, MF_STRING, IDM_PROTO_ALL, L"全部协议(&A)");
-    AppendMenuW(proto, MF_STRING, IDM_PROTO_TCP, L"仅 TCP(&T)");
-    AppendMenuW(proto, MF_STRING, IDM_PROTO_UDP, L"仅 UDP(&U)");
-    AppendMenuW(proto, MF_STRING, IDM_PROTO_V4,  L"仅 IPv4(&4)");
-    AppendMenuW(proto, MF_STRING, IDM_PROTO_V6,  L"仅 IPv6(&6)");
-    AppendMenuW(filter, MF_POPUP, (UINT_PTR)proto, L"协议(&P)");
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_ALL, Tr(TXT_PROTO_ALL));
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_TCP, Tr(TXT_PROTO_TCP));
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_UDP, Tr(TXT_PROTO_UDP));
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_V4,  Tr(TXT_PROTO_V4));
+    AppendMenuW(proto, MF_STRING, IDM_PROTO_V6,  Tr(TXT_PROTO_V6));
+    AppendMenuW(filter, MF_POPUP, (UINT_PTR)proto, Tr(TXT_PROTOCOL));
+
+    lang = CreatePopupMenu();
+    AppendMenuW(lang, MF_STRING, IDM_LANG_EN, L"English");
+    AppendMenuW(lang, MF_STRING, IDM_LANG_ZH, L"中文");
 
     bar = CreateMenu();
-    AppendMenuW(bar, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)filter, L"筛选(&F)");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)filter, Tr(TXT_FILTER));
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)lang, Tr(TXT_LANGUAGE));
     return bar;
 }
 
@@ -640,6 +931,7 @@ static void SyncFilterMenu(void)
     HMENU bar = GetMenu(g_hwndMain);
     HMENU filter;
     HMENU proto;
+    HMENU lang;
 
     if (!bar) return;
     filter = GetSubMenu(bar, 0);
@@ -655,6 +947,12 @@ static void SyncFilterMenu(void)
         CheckMenuRadioItem(proto, IDM_PROTO_ALL, IDM_PROTO_V6,
                            IDM_PROTO_ALL + g_protoFilter, MF_BYCOMMAND);
     }
+
+    lang = GetSubMenu(bar, 1);
+    if (lang) {
+        int cmd = g_english ? IDM_LANG_EN : IDM_LANG_ZH;
+        CheckMenuRadioItem(lang, IDM_LANG_EN, IDM_LANG_ZH, cmd, MF_BYCOMMAND);
+    }
 }
 
 static void UpdateStatus(void)
@@ -665,7 +963,7 @@ static void UpdateStatus(void)
     size_t listen = 0, i;
 
     for (i = 0; i < g_allCount; ++i) {
-        if (_wcsicmp(g_all[i].state, L"监听") == 0) listen++;
+        if (g_all[i].stateCode == MIB_TCP_STATE_LISTEN) listen++;
     }
 
     if (g_haveSuccessTime) st = g_lastSuccessTime;
@@ -676,34 +974,32 @@ static void UpdateStatus(void)
      * 当前到底滤了什么，列表突然变短会让人以为程序出问题了。
      */
     {
-        static const WCHAR *const PROTO_TEXT[5] = {
-            L"", L"仅 TCP · ", L"仅 UDP · ", L"仅 IPv4 · ", L"仅 IPv6 · "
-        };
+        static const int COND_PROTO[5] = { -1, TXT_COND_TCP, TXT_COND_UDP, TXT_COND_V4, TXT_COND_V6 };
         size_t k = 0;
         cond[0] = 0;
-        if (g_protoFilter) k = (size_t)_snwprintf(cond, 160, L"%s", PROTO_TEXT[g_protoFilter]);
-        if (g_listenOnly && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"仅监听 · ");
-        if (g_hideSystem && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"已隐藏系统端口 · ");
-        if (g_exactMatch && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"精确匹配 · ");
-        if (g_autoOn && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"自动刷新 · ");
+        if (g_protoFilter) {
+            k = (size_t)_snwprintf(cond, 160, L"%s", Tr(COND_PROTO[g_protoFilter]));
+        }
+        if (g_listenOnly && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"%s", Tr(TXT_COND_LISTEN));
+        if (g_hideSystem && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"%s", Tr(TXT_COND_HIDEP));
+        if (g_exactMatch && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"%s", Tr(TXT_COND_EXACT));
+        if (g_autoOn && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"%s", Tr(TXT_COND_AUTO));
     }
 
     if (g_portsLoading && !g_haveSuccessTime) {
-        _snwprintf(text, 320, L"正在读取端口表… · %s", cond);
+        _snwprintf(text, 320, Tr(TXT_BAR_LOADING), cond);
     } else if (g_enumFailed) {
-        _snwprintf(text, 320,
-                   L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
-                   st.wHour, st.wMinute, st.wSecond);
+        _snwprintf(text, 320, Tr(TXT_BAR_FAILED), st.wHour, st.wMinute, st.wSecond);
     } else {
-        const WCHAR *partial = (g_tableMask == PORT_TABLE_ALL) ? L"" : L"部分结果 · ";
-        const WCHAR *loading = g_portsLoading ? L"正在刷新 · " : L"";
-        _snwprintf(text, 320, L"%s%s共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
+        const WCHAR *partial = (g_tableMask == PORT_TABLE_ALL) ? L"" : Tr(TXT_BAR_PARTIAL);
+        const WCHAR *loading = g_portsLoading ? Tr(TXT_BAR_REFRESHING) : L"";
+        _snwprintf(text, 320, Tr(TXT_BAR_SUMMARY),
                    loading, partial, (unsigned)g_allCount, (unsigned)listen,
                    (unsigned)g_viewCount, cond, st.wHour, st.wMinute, st.wSecond);
     }
     text[319] = 0;
 
-    if (g_killBusy) wcscpy(text, L"正在结束进程…");
+    if (g_killBusy) wcscpy(text, Tr(TXT_BAR_KILLING));
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)text);
 
     /*
@@ -712,9 +1008,9 @@ static void UpdateStatus(void)
      * 已提权则只是纯状态，不可点。
      */
     if (ProcIsElevated()) {
-        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)L"管理员");
+        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)Tr(TXT_BAR_ADMIN));
     } else {
-        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)L"标准用户 · 点击提权");
+        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)Tr(TXT_BAR_STD_USER));
     }
 }
 
@@ -727,18 +1023,18 @@ static const WCHAR *EmptyHintText(void)
 {
     /* 区分两种「空」：本来就没数据，与有数据但被筛选条件滤光。
      * 后者必须提示去清条件，否则用户会以为程序坏了。 */
-    if (g_portsLoading && g_allCount == 0) return L"正在读取端口表…";
-    if (g_enumFailed && g_allCount == 0) return L"读取端口表失败\n显示的是上一次成功读取的结果";
-    if (g_allCount == 0) return L"当前没有检测到端口占用";
+    if (g_portsLoading && g_allCount == 0) return Tr(TXT_EMPTY_LOADING);
+    if (g_enumFailed && g_allCount == 0) return Tr(TXT_EMPTY_FAILED);
+    if (g_allCount == 0) return Tr(TXT_EMPTY_NONE);
     if (g_hideSystem)
-        return L"没有符合当前条件的端口\n当前已隐藏系统关键进程占用的端口\n试试取消「隐藏系统端口」";
+        return Tr(TXT_EMPTY_HIDEP);
     if (g_exactMatch)
-        return L"没有与搜索内容完全相同的端口、PID、进程名或地址\n可取消「精确匹配」改回包含搜索";
+        return Tr(TXT_EMPTY_EXACT);
     if (g_listenOnly || g_protoFilter != 0)
-        return L"没有符合当前筛选条件的端口\n试试取消「仅监听端口」或切换协议";
+        return Tr(TXT_EMPTY_FILTER);
     if (g_allCount > 0)
-        return L"没有匹配的端口\n试试清空筛选框";
-    return L"当前没有检测到端口占用";
+        return Tr(TXT_EMPTY_NOMATCH);
+    return Tr(TXT_EMPTY_NONE);
 }
 
 /*
@@ -871,12 +1167,12 @@ static void ApplyView(BOOL keepViewport)
         if (g_view) {
             for (i = 0; i < g_allCount; ++i) {
                 const PORT_ENTRY *e = &g_all[i];
-                BOOL listening = (_wcsicmp(e->state, L"监听") == 0);
+                BOOL listening = (e->stateCode == MIB_TCP_STATE_LISTEN);
 
                 /* 四个条件是「与」：文本框模糊匹配 + 协议范围 + 仅监听 + 屏蔽系统端口
                  * UDP 没有连接状态，本身就是常驻端口，所以不参与「仅监听」判定，
                  * 否则勾上之后 UDP 会整片消失。 */
-                if (g_listenOnly && !e->state[0]) continue;
+                if (g_listenOnly && !e->stateCode) continue;
                 if (g_listenOnly && !listening) continue;
                 if (g_hideSystem && IsSystemOwner(e)) continue;
                 if (!MatchProto(e, g_protoFilter)) continue;
@@ -1068,21 +1364,20 @@ static void UpdateInfoBar(void)
     if (!g_hInfoBar) return;
 
     if (!e) {
-        SetWindowTextW(g_hInfoBar, L"　选中一行查看占用详情");
+        SetWindowTextW(g_hInfoBar, Tr(TXT_INFO_NONE));
         return;
     }
 
     if (e->procPath[0]) {
         CompactPath(e->procPath, path, 96);
-        _snwprintf(text, 512, L"　%s　PID %u　%s",
-                   e->procName[0] ? e->procName : L"(未知进程)",
+        _snwprintf(text, 512, Tr(TXT_INFO_LINE),
+                   e->procName[0] ? e->procName : Tr(TXT_INFO_UNKNOWN_PROC),
                    e->pid,
                    path);
     } else {
         /* 无路径多是权限不足，明确说出来，免得以为程序没取到 */
-        _snwprintf(text, 512,
-                   L"　%s　PID %u　（映像路径不可用，可能需要管理员权限）",
-                   e->procName[0] ? e->procName : L"(未知进程)", e->pid);
+        _snwprintf(text, 512, Tr(TXT_INFO_NOPATH),
+                   e->procName[0] ? e->procName : Tr(TXT_INFO_UNKNOWN_PROC), e->pid);
     }
     text[511] = 0;
 
@@ -1097,9 +1392,8 @@ static void UpdateInfoBar(void)
  */
 static BOOL ConfirmElevate(HWND hwnd)
 {
-    if (MessageBoxW(hwnd,
-                    L"以管理员身份重启后可以查看并结束系统级进程。\n是否继续？",
-                    L"提权", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+    if (MessageBoxW(hwnd, Tr(TXT_MB_ELEVATE_BODY), Tr(TXT_MB_ELEVATE_TITLE),
+                    MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return FALSE;
     }
 
@@ -1108,7 +1402,7 @@ static BOOL ConfirmElevate(HWND hwnd)
         return TRUE;
     }
 
-    MessageBoxW(hwnd, L"提权失败或已被取消。", L"提示", MB_OK | MB_ICONWARNING);
+    MessageBoxW(hwnd, Tr(TXT_MB_ELEVATE_FAIL), Tr(TXT_MB_HINT), MB_OK | MB_ICONWARNING);
     return FALSE;
 }
 
@@ -1142,20 +1436,20 @@ static void StartKill(HWND hwnd, const PORT_ENTRY *target, BOOL tree)
     HANDLE thread;
 
     if (InterlockedCompareExchange(&g_killBusy, 1, 0) != 0) {
-        MessageBoxW(hwnd, L"上一次结束操作还在进行，请稍候。", L"请稍候",
+        MessageBoxW(hwnd, Tr(TXT_MB_KILL_BUSY), Tr(TXT_MB_WAIT),
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
     request = (KILL_REQUEST *)calloc(1, sizeof(*request));
     if (!request) {
         InterlockedExchange(&g_killBusy, 0);
-        MessageBoxW(hwnd, L"内存不足，无法开始结束操作。", L"失败", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd, Tr(TXT_MB_OOM), Tr(TXT_MB_FAIL), MB_OK | MB_ICONERROR);
         return;
     }
     request->hwnd = hwnd;
     request->entry = *target;
     request->tree = tree;
-    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)L"正在结束进程…");
+    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)Tr(TXT_BAR_KILLING));
     SetTimer(g_hwndMain, ID_KILL_TIMER, 250, NULL);
 
     thread = CreateThread(NULL, 0, KillWorker, request, 0, NULL);
@@ -1163,7 +1457,7 @@ static void StartKill(HWND hwnd, const PORT_ENTRY *target, BOOL tree)
         KillTimer(g_hwndMain, ID_KILL_TIMER);
         free(request);
         InterlockedExchange(&g_killBusy, 0);
-        MessageBoxW(hwnd, L"无法开始结束操作。", L"失败", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd, Tr(TXT_MB_START_FAIL), Tr(TXT_MB_FAIL), MB_OK | MB_ICONERROR);
         UpdateStatus();
     } else {
         CloseHandle(thread);
@@ -1200,29 +1494,21 @@ static void FinishKill(KILL_REQUEST *request)
         case PROC_KILL_OK:
             break;
         case PROC_KILL_REUSED:
-            MessageBoxW(request->hwnd,
-                        L"该 PID 已不是你选择的那个进程（原进程期间已退出，PID 被系统重新分配）。\n"
-                        L"为避免误杀无关进程，本次没有执行结束操作。\n请确认列表上的进程后再试。",
-                        L"已中止", MB_OK | MB_ICONWARNING);
+            MessageBoxW(request->hwnd, Tr(TXT_MB_REUSED_BODY), Tr(TXT_MB_ABORTED),
+                        MB_OK | MB_ICONWARNING);
             break;
         case PROC_KILL_PARTIAL:
-            MessageBoxW(request->hwnd,
-                        L"进程树已处理，但有部分成员没有结束：它们可能已经退出、PID 已被复用，\n"
-                        L"或权限不足——读不到创建时间的进程无法确认它是否属于这棵树，已跳过。",
-                        L"部分完成", MB_OK | MB_ICONWARNING);
+            MessageBoxW(request->hwnd, Tr(TXT_MB_PARTIAL_BODY), Tr(TXT_MB_PARTIAL_TITLE),
+                        MB_OK | MB_ICONWARNING);
             break;
         case PROC_KILL_SELF:
-            MessageBoxW(request->hwnd,
-                        L"要结束的范围里包含本工具自己（你选中的就是它，或者它在那棵进程树里，\n"
-                        L"例如本工具是从你要结束的那个命令行启动的）。\n"
-                        L"为避免操作进行到一半工具自己消失，本次没有执行。",
-                        L"已中止", MB_OK | MB_ICONWARNING);
+            MessageBoxW(request->hwnd, Tr(TXT_MB_SELF_BODY), Tr(TXT_MB_ABORTED),
+                        MB_OK | MB_ICONWARNING);
             break;
         case PROC_KILL_FAILED:
         default:
-            _snwprintf(msg, 512, L"结束失败（错误 %u）。\n如果是系统或其他用户的进程，请以管理员身份运行本工具。",
-                       request->error);
-            MessageBoxW(request->hwnd, msg, L"失败", MB_OK | MB_ICONERROR);
+            _snwprintf(msg, 512, Tr(TXT_MB_KILL_ERR), request->error);
+            MessageBoxW(request->hwnd, msg, Tr(TXT_MB_FAIL), MB_OK | MB_ICONERROR);
             break;
         }
     }
@@ -1242,25 +1528,22 @@ static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
     target = *e;
 
     if (target.pid == 0 || target.pid == 4) {
-        MessageBoxW(hwnd, L"该系统进程无法结束。", L"无法结束", MB_OK | MB_ICONWARNING);
+        MessageBoxW(hwnd, Tr(TXT_MB_SYS_PROC), Tr(TXT_MB_CANNOT_KILL), MB_OK | MB_ICONWARNING);
         return;
     }
 
     if (!target.procCreateValid) {
-        MessageBoxW(hwnd,
-                    L"无法确认该进程的身份：它可能已经退出，也可能权限不足读不到它的启动时间。\n"
-                    L"为避免误杀已被系统复用了同一 PID 的其它进程，本次操作已取消。",
-                    L"未能结束", MB_OK | MB_ICONWARNING);
+        MessageBoxW(hwnd, Tr(TXT_MB_IDENTITY_BODY), Tr(TXT_MB_NOT_KILLED),
+                    MB_OK | MB_ICONWARNING);
         PostMessage(g_hwndMain, WM_APP_REFRESH, 0, 0);
         return;
     }
 
-    wcsncpy(title, tree ? L"结束进程树" : L"结束进程", 127);
+    wcsncpy(title, Tr(tree ? TXT_MB_KILL_TREE_TITLE : TXT_MB_KILL_TITLE), 127);
     title[127] = 0;
 
     _snwprintf(msg, 512,
-               tree ? L"确定结束进程 %s（PID %u）及其所有子进程吗？\n未保存的数据将丢失。"
-                    : L"确定结束进程 %s（PID %u）吗？\n未保存的数据将丢失。",
+               Tr(tree ? TXT_MB_KILL_TREE_CONFIRM : TXT_MB_KILL_CONFIRM),
                target.procName, target.pid);
 
     if (MessageBoxW(hwnd, msg, title, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
@@ -1289,19 +1572,19 @@ static void ShowContextMenu(HWND hwnd, int item, int x, int y)
     if (!menu) return;
 
     if (e) {
-        AppendMenuW(menu, MF_STRING, IDM_DETAIL, L"查看进程详情(&D)");
-        AppendMenuW(menu, MF_STRING, IDM_OPEN_LOC, L"打开文件所在位置(&O)");
+        AppendMenuW(menu, MF_STRING, IDM_DETAIL, Tr(TXT_CTX_DETAIL));
+        AppendMenuW(menu, MF_STRING, IDM_OPEN_LOC, Tr(TXT_CTX_OPEN_LOC));
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, IDM_KILL, L"结束进程(&K)");
-        AppendMenuW(menu, MF_STRING, IDM_KILL_TREE, L"结束进程树(&T)");
+        AppendMenuW(menu, MF_STRING, IDM_KILL, Tr(TXT_CTX_KILL));
+        AppendMenuW(menu, MF_STRING, IDM_KILL_TREE, Tr(TXT_CTX_KILL_TREE));
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, IDM_COPY_PATH, L"复制映像路径(&C)");
-        AppendMenuW(menu, MF_STRING, IDM_COPY_PID, L"复制 PID");
-        AppendMenuW(menu, MF_STRING, IDM_COPY_ROW, L"复制整行");
+        AppendMenuW(menu, MF_STRING, IDM_COPY_PATH, Tr(TXT_CTX_COPY_PATH));
+        AppendMenuW(menu, MF_STRING, IDM_COPY_PID, Tr(TXT_CTX_COPY_PID));
+        AppendMenuW(menu, MF_STRING, IDM_COPY_ROW, Tr(TXT_CTX_COPY_ROW));
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, IDM_FILTER_SEL, L"按该进程名过滤(&F)");
+        AppendMenuW(menu, MF_STRING, IDM_FILTER_SEL, Tr(TXT_CTX_FILTER_SEL));
     }
-    AppendMenuW(menu, MF_STRING, ID_BTN_REFRESH, L"刷新(&R)\tF5");
+    AppendMenuW(menu, MF_STRING, ID_BTN_REFRESH, Tr(TXT_CTX_REFRESH));
 
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
     DestroyMenu(menu);
@@ -1353,7 +1636,8 @@ static void FillModules(HWND hList, DWORD pid)
          * 存储（本列表非 LVS_OWNERDATA），所以函数返回后指针失效是安全的。
          * 注意：若将来把这个列表改成虚拟列表 / 延迟渲染，就不能再这样传，必须先存到常驻缓冲。
          */
-        WCHAR msg[] = L"无法读取模块列表（需要更高权限，或进程已退出）";
+        WCHAR msg[160];
+        wcscpy(msg, Tr(TXT_MB_NO_MODULES));
         ZeroMemory(&it, sizeof(it));
         it.mask = LVIF_TEXT;
         it.iItem = 0;
@@ -1467,13 +1751,13 @@ static void RequestDetail(HWND hwnd, DETAIL_CTX *ctx)
     result->generation = ++ctx->generation;
     result->entry = ctx->entry;
     ctx->loading = TRUE;
-    SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), L"正在读取…");
+    SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), Tr(TXT_D_LOADING));
 
     thread = CreateThread(NULL, 0, DetailWorker, result, 0, NULL);
     if (!thread) {
         ctx->loading = FALSE;
         FreeDetailResult(result);
-        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), L"（不可用）");
+        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), Tr(TXT_D_UNAVAIL));
         return;
     }
     CloseHandle(thread);
@@ -1492,8 +1776,7 @@ static void ApplyDetailResult(HWND hwnd, DETAIL_CTX *ctx, DETAIL_RESULT *result)
     }
     if (!result->identityOk) {
         SetWindowTextW(GetDlgItem(hwnd, D_ED_PATH), L"");
-        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD),
-                       L"（原进程已退出或 PID 已被其它进程复用，未刷新它的数据）");
+        SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD), Tr(TXT_D_STALE));
         ListView_DeleteAllItems(GetDlgItem(hwnd, D_LIST_MOD));
         FreeDetailResult(result);
         return;
@@ -1507,7 +1790,7 @@ static void ApplyDetailResult(HWND hwnd, DETAIL_CTX *ctx, DETAIL_RESULT *result)
     SetWindowTextW(GetDlgItem(hwnd, D_ST_NAME), title);
     SetWindowTextW(GetDlgItem(hwnd, D_ED_PATH), ctx->entry.procPath);
     SetWindowTextW(GetDlgItem(hwnd, D_ED_CMD),
-                   result->commandOk && ctx->commandLine ? ctx->commandLine : L"（不可用）");
+                   result->commandOk && ctx->commandLine ? ctx->commandLine : Tr(TXT_D_UNAVAIL));
     icon = LoadProcessIcon(&ctx->entry);
     ApplyProcessIcon(hwnd, ctx, icon);
     FillModules(GetDlgItem(hwnd, D_LIST_MOD), ctx->entry.pid);
@@ -1527,7 +1810,8 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HWND h;
         LVCOLUMNW col;
         int i;
-        const WCHAR *titles[4] = { L"模块", L"文件路径", L"基址", L"大小" };
+        const WCHAR *titles[4] = { Tr(TXT_D_COL_MODULE), Tr(TXT_D_COL_PATH),
+                                   Tr(TXT_D_COL_BASE), Tr(TXT_D_COL_SIZE) };
         const int widths[4] = { 150, 300, 110, 80 };
 
         ctx = (DETAIL_CTX *)calloc(1, sizeof(DETAIL_CTX));
@@ -1545,7 +1829,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_NAME, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Static", L"映像路径：", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        h = CreateWindowExW(0, L"Static", Tr(TXT_D_PATH_LABEL), WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_PATH, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
@@ -1554,17 +1838,17 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ED_PATH, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Static", L"命令行：", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        h = CreateWindowExW(0, L"Static", Tr(TXT_D_CMD_LABEL), WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_CMD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"正在读取…",
+        h = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", Tr(TXT_D_LOADING),
                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
                             ES_READONLY | ES_MULTILINE | ES_AUTOVSCROLL,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ED_CMD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Static", L"已加载模块（关联文件）：",
+        h = CreateWindowExW(0, L"Static", Tr(TXT_D_MOD_LABEL),
                             WS_CHILD | WS_VISIBLE | SS_LEFT,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_ST_MOD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
@@ -1587,22 +1871,22 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
 
-        h = CreateWindowExW(0, L"Button", L"打开所在目录",
+        h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_LOC),
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_LOC, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Button", L"结束进程",
+        h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_KILL),
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_KILL, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Button", L"重新加载",
+        h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_RELOAD),
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_RELOAD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
 
-        h = CreateWindowExW(0, L"Button", L"关闭",
+        h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_CLOSE),
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_CLOSE, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
@@ -1685,10 +1969,11 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case D_BTN_LOC:
             if (ctx && ctx->entry.procPath[0]) {
                 if (!ProcOpenFileLocation(hwnd, ctx->entry.procPath)) {
-                    MessageBoxW(hwnd, L"无法打开该位置。", L"提示", MB_OK | MB_ICONWARNING);
+                    MessageBoxW(hwnd, Tr(TXT_MB_NO_LOCATION), Tr(TXT_MB_HINT),
+                                MB_OK | MB_ICONWARNING);
                 }
             } else {
-                MessageBoxW(hwnd, L"该进程的映像路径不可用（权限不足）。", L"提示", MB_OK | MB_ICONWARNING);
+                MessageBoxW(hwnd, Tr(TXT_MB_NO_PATH), Tr(TXT_MB_HINT), MB_OK | MB_ICONWARNING);
             }
             return 0;
 
@@ -1713,7 +1998,7 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 WCHAR path[MAX_PATH];
                 ListView_GetItemText(GetDlgItem(hwnd, D_LIST_MOD), item, 1, path, MAX_PATH);
                 if (!path[0] || !ProcOpenFileLocation(hwnd, path)) {
-                    MessageBoxW(hwnd, L"无法打开该模块所在位置。", L"提示",
+                    MessageBoxW(hwnd, Tr(TXT_MB_NO_MOD_LOC), Tr(TXT_MB_HINT),
                                 MB_OK | MB_ICONWARNING);
                 }
             }
@@ -1748,7 +2033,7 @@ static void OpenDetail(HWND parent, const PORT_ENTRY *e)
     PORT_ENTRY copy = *e;
     HWND hwnd;
 
-    hwnd = CreateWindowExW(0, DETAIL_CLASS, L"进程详情",
+    hwnd = CreateWindowExW(0, DETAIL_CLASS, Tr(TXT_DETAIL_TITLE),
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                            CW_USEDEFAULT, CW_USEDEFAULT,
                            S(parent, 760), S(parent, 520),
@@ -1790,6 +2075,32 @@ static void LayoutColumns(HWND hwnd)
         if (pathW < S(hwnd, COL_PATH_MIN)) pathW = S(hwnd, COL_PATH_MIN);
         ListView_SetColumnWidth(g_hList, COL_PATH, pathW);
     }
+}
+
+/*
+ * 量出标签当前文字的实际宽度。列宽原本按中文字数写死，换成英文同样的位置
+ * 要放「Process」「Keyword」这类长词，写死的宽度会把最后一个字符切掉。
+ */
+static int LabelWidth(HWND label, int fallback)
+{
+    WCHAR text[64];
+    HDC hdc;
+    HFONT old;
+    SIZE size;
+    int n;
+
+    if (!label) return fallback;
+    n = GetWindowTextW(label, text, 64);
+    if (n <= 0 || n >= 64) return fallback;
+
+    hdc = GetDC(label);
+    if (!hdc) return fallback;
+    old = (HFONT)SelectObject(hdc, (HFONT)SendMessageW(label, WM_GETFONT, 0, 0));
+    GetTextExtentPoint32W(hdc, text, n, &size);
+    SelectObject(hdc, old);
+    ReleaseDC(label, hdc);
+
+    return size.cx + S(label, 6);   /* 留一点余量，避免末字符贴边 */
 }
 
 static void LayoutMain(HWND hwnd)
@@ -1836,10 +2147,10 @@ static void LayoutMain(HWND hwnd)
         int labelGap = S(hwnd, 4);
         int rowGap = S(hwnd, 6);
         int wRefresh = S(hwnd, 86);
-        int wPortLabel = S(hwnd, 34);
-        int wPidLabel = S(hwnd, 30);
-        int wNameLabel = S(hwnd, 48);
-        int wKeyLabel = S(hwnd, 48);
+        int wPortLabel = LabelWidth(g_hLblPort, S(hwnd, 34));
+        int wPidLabel = LabelWidth(g_hLblPid, S(hwnd, 30));
+        int wNameLabel = LabelWidth(g_hLblName, S(hwnd, 48));
+        int wKeyLabel = LabelWidth(g_hLblKey, S(hwnd, 48));
         int editPad = 0;
         int wPort = S(hwnd, 72);
         int wPid = S(hwnd, 76);
@@ -1883,6 +2194,63 @@ static void LayoutMain(HWND hwnd)
     SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
 }
 
+/*
+ * 静态文案集中落地：标题、查询区标签与提示文字、刷新按钮、列头。
+ * 首次创建和切换语言都走这里，两处共用一份，不会漏掉某个控件。
+ */
+static void ApplyStaticTexts(void)
+{
+    LVCOLUMNW col;
+    int i;
+
+    if (!g_hwndMain || !g_hList) return;
+
+    SetWindowTextW(g_hwndMain, Tr(TXT_WINDOW));
+    SetWindowTextW(g_hLblPort, Tr(TXT_PORT));
+    SetWindowTextW(g_hLblPid, Tr(TXT_PID));
+    SetWindowTextW(g_hLblName, Tr(TXT_PROCESS));
+    SetWindowTextW(g_hLblKey, Tr(TXT_KEYWORD));
+    SetWindowTextW(g_hBtnRefresh, Tr(TXT_REFRESH));
+
+    SendMessageW(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_PORT));
+    SendMessageW(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_PID));
+    SendMessageW(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_NAME));
+    SendMessageW(g_hEdit, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_KEY));
+
+    ZeroMemory(&col, sizeof(col));
+    col.mask = LVCF_TEXT;
+    for (i = 0; i < COL_COUNT; ++i) {
+        col.pszText = (LPWSTR)Tr(COL_TEXT[i]);
+        ListView_SetColumn(g_hList, i, &col);
+    }
+}
+
+/*
+ * 切换界面语言。菜单是整条重建的（逐项改文本容易漏掉助记符），其余控件只换文字，
+ * 最后重排一次布局并让列表重新取文本——状态列的文字和排序都跟语言有关。
+ */
+static void ApplyLanguage(int english)
+{
+    HMENU bar, old;
+
+    if (g_english == english) return;
+    g_english = english;
+    if (!g_hwndMain) return;
+
+    bar = BuildMainMenu();
+    if (bar) {
+        old = GetMenu(g_hwndMain);
+        SetMenu(g_hwndMain, bar);       /* SetMenu 换掉旧菜单但不销毁，得自己释放 */
+        DrawMenuBar(g_hwndMain);
+        if (old) DestroyMenu(old);
+    }
+
+    ApplyStaticTexts();
+    SyncFilterMenu();
+    LayoutMain(g_hwndMain);
+    ApplyView(TRUE);   /* 只换文字，不动筛选：滚动位置没必要跟着跳 */
+}
+
 static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -1895,16 +2263,17 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hFont = CreateUIFont(GetDpiOf(hwnd));
         if (!g_hQueryBrush) g_hQueryBrush = CreateSolidBrush(RGB(241, 246, 252));
 
-        g_hLblPort = CreateWindowExW(0, L"Static", L"端口",
+        /* 文字统一由 ApplyStaticTexts 按当前语言写入，这里只建控件 */
+        g_hLblPort = CreateWindowExW(0, L"Static", L"",
                                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PORT, g_hInst, NULL);
-        g_hLblPid = CreateWindowExW(0, L"Static", L"PID",
+        g_hLblPid = CreateWindowExW(0, L"Static", L"",
                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PID, g_hInst, NULL);
-        g_hLblName = CreateWindowExW(0, L"Static", L"进程名",
+        g_hLblName = CreateWindowExW(0, L"Static", L"",
                                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_NAME, g_hInst, NULL);
-        g_hLblKey = CreateWindowExW(0, L"Static", L"关键字",
+        g_hLblKey = CreateWindowExW(0, L"Static", L"",
                                     WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_KEY, g_hInst, NULL);
 
@@ -1912,7 +2281,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PORT,
                                       g_hInst, NULL);
-        SendMessage(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)L"80");
         SendMessage(g_hEditPort, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
         SetWindowSubclass(g_hEditPort, QueryEditProc, 1, 0);
 
@@ -1920,7 +2288,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_PID,
                                      g_hInst, NULL);
-        SendMessage(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)L"1234");
         SendMessage(g_hEditPid, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
         SetWindowSubclass(g_hEditPid, QueryEditProc, 2, 0);
 
@@ -1928,7 +2295,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_NAME,
                                       g_hInst, NULL);
-        SendMessage(g_hEditName, EM_SETCUEBANNER, TRUE, (LPARAM)L"nginx.exe");
         SendMessage(g_hEditName, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
         SetWindowSubclass(g_hEditName, QueryEditProc, 3, 0);
 
@@ -1936,18 +2302,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_EDIT_FILTER,
                                   g_hInst, NULL);
-        SendMessage(g_hEdit, EM_SETCUEBANNER, TRUE,
-                    (LPARAM)L"地址、路径或状态");
         SendMessage(g_hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
         SetWindowSubclass(g_hEdit, QueryEditProc, 4, 0);
 
-        g_hBtnRefresh = CreateWindowExW(0, L"Button", L"刷新 (F5)",
+        g_hBtnRefresh = CreateWindowExW(0, L"Button", L"",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                         0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_BTN_REFRESH,
                                         g_hInst, NULL);
-
-        /*
-         * g_hInst, NULL);
 
         /* LVS_OWNERDATA：虚拟列表，行文本按需提供，刷新时不必逐行重建 */
         g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -1966,8 +2327,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         ZeroMemory(&col, sizeof(col));
         col.mask = LVCF_TEXT | LVCF_WIDTH;
+        col.pszText = (LPWSTR)L"";    /* 列名由 ApplyStaticTexts 按当前语言写入 */
         for (i = 0; i < COL_COUNT; ++i) {
-            col.pszText = (LPWSTR)COL_TITLES[i];
             col.cx = S(hwnd, COL_WIDTHS[i]);
             ListView_InsertColumn(g_hList, i, &col);
         }
@@ -1993,6 +2354,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_autoOn = TRUE;
         SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
 
+        ApplyStaticTexts();
         LayoutMain(hwnd);
         ReloadAndApply();
         return 0;
@@ -2004,7 +2366,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     /*
      * 静态控件与列表的标签统一用窗口背景。
-     * 勾选框是 BS_OWNERDRAW，WM_PAINT 根本不走这里，所以不需要 WM_CTLCOLORBTN。
      */
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == g_hLblPort || (HWND)lp == g_hLblPid ||
@@ -2021,40 +2382,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTextColor((HDC)wp, RGB(17, 24, 39));
         SetBkColor((HDC)wp, RGB(255, 255, 255));
         return (LRESULT)GetStockObject(WHITE_BRUSH);
-
-    case WM_MEASUREITEM:
-    {
-        MEASUREITEMSTRUCT *item = (MEASUREITEMSTRUCT *)lp;
-        if (item->CtlType == ODT_MENU) {
-            item->itemWidth = S(hwnd, 42);
-            item->itemHeight = S(hwnd, 32);
-            return TRUE;
-        }
-        break;
-    }
-
-    case WM_DRAWITEM:
-    {
-        DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lp;
-        RECT rc = item->rcItem;
-        HBRUSH fill;
-        HPEN pen, oldPen;
-        if (item->CtlType != ODT_MENU) break;
-        InflateRect(&rc, -S(hwnd, 2), -S(hwnd, 1));
-        fill = CreateSolidBrush((item->itemState & ODS_SELECTED) ? RGB(208, 212, 218) : RGB(232, 235, 239));
-        pen = CreatePen(PS_SOLID, 1, RGB(150, 156, 164));
-        FillRect(item->hDC, &rc, fill);
-        oldPen = (HPEN)SelectObject(item->hDC, pen);
-        SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
-        Rectangle(item->hDC, rc.left, rc.top, rc.right, rc.bottom);
-        SelectObject(item->hDC, oldPen);
-        SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, RGB(32, 32, 32));
-        DrawTextW(item->hDC, L"筛选", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        DeleteObject(fill);
-        DeleteObject(pen);
-        return TRUE;
-    }
 
     case WM_ERASEBKGND:
     {
@@ -2133,6 +2460,14 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ApplyView(FALSE);
             return 0;
 
+        case IDM_LANG_EN:
+            ApplyLanguage(1);
+            return 0;
+
+        case IDM_LANG_ZH:
+            ApplyLanguage(0);
+            return 0;
+
         case ID_EDIT_PORT:
         case ID_EDIT_PID:
         case ID_EDIT_NAME:
@@ -2162,8 +2497,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             const PORT_ENTRY *e = SelectedEntry();
             if (e) {
                 if (!e->procPath[0] || !ProcOpenFileLocation(hwnd, e->procPath)) {
-                    MessageBoxW(hwnd, L"该文件位置不可用（进程路径未知或权限不足）。",
-                                L"提示", MB_OK | MB_ICONWARNING);
+                    MessageBoxW(hwnd, Tr(TXT_MB_OPEN_LOC_FAIL),
+                                Tr(TXT_MB_HINT), MB_OK | MB_ICONWARNING);
                 }
             }
             return 0;
@@ -2228,7 +2563,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (e) {
                 _snwprintf(t, 1024, L"%s\t%s:%u\t%s:%u\t%s\t%u\t%s\t%s",
                            e->proto, e->localAddr, e->localPort,
-                           e->remoteAddr, e->remotePort, e->state,
+                           e->remoteAddr, e->remotePort, EntryStateText(e),
                            e->pid, e->procName, e->procPath);
                 t[1023] = 0;
                 CopyText(hwnd, t);
@@ -2279,7 +2614,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     cd->clrText = CLR_DEFAULT;
                     if (cd->iSubItem == COL_STATE &&
                         (size_t)cd->nmcd.dwItemSpec < g_viewCount) {
-                        cd->clrText = StateTextColor(g_view[cd->nmcd.dwItemSpec].state);
+                        cd->clrText = StateTextColor(&g_view[cd->nmcd.dwItemSpec]);
                     }
                     return CDRF_NEWFONT;
                 }
@@ -2359,7 +2694,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         } else if (wp == ID_TIMER) {
             ReloadAndApply();
         } else if (wp == ID_KILL_TIMER) {
-            SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)L"正在结束进程…");
+            SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)Tr(TXT_BAR_KILLING));
         }
         return 0;
 
@@ -2387,7 +2722,6 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_view = NULL;
         if (g_hFont) DeleteObject(g_hFont);
         if (g_hQueryBrush) { DeleteObject(g_hQueryBrush); g_hQueryBrush = NULL; }
-        g_filterMenu = NULL;
         PostQuitMessage(0);
         return 0;
     }
@@ -2445,7 +2779,7 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     menu = BuildMainMenu();
     if (!menu) return 1;
 
-    hwnd = CreateWindowExW(0, MAIN_CLASS, L"端口占用查看器 — PortView",
+    hwnd = CreateWindowExW(0, MAIN_CLASS, Tr(TXT_WINDOW),
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                            CW_USEDEFAULT, CW_USEDEFAULT,
                            MulDiv(980, (int)dpi, 96), MulDiv(620, (int)dpi, 96),
