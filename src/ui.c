@@ -46,6 +46,7 @@
 #define IDM_AUTO       2020
 #define IDM_LISTEN     2021
 #define IDM_HIDESYS    2022
+#define IDM_EXACT      2023   /* 搜索框按完整字段匹配，而不是包含匹配 */
 #define IDM_PROTO_ALL  2030
 #define IDM_PROTO_TCP  2031
 #define IDM_PROTO_UDP  2032
@@ -133,6 +134,7 @@ static void UpdateInfoBar(void);
 static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
 static int g_listenOnly = 0;    /* 1=只看监听端口 */
 static int g_hideSystem = 0;    /* 1=隐藏系统关键进程占用的端口 */
+static int g_exactMatch = 0;    /* 1=搜索框按完整字段匹配 */
 static BOOL g_autoOn = TRUE;    /* 自动刷新勾选框状态 */
 static BOOL g_hadInitialSelect = FALSE;   /* 首次载入是否已做过默认选中 */
 
@@ -249,6 +251,11 @@ static BOOL ContainsI(const WCHAR *hay, const WCHAR *needle)
     return FALSE;
 }
 
+static BOOL EqualsI(const WCHAR *value, const WCHAR *key)
+{
+    return value && key && _wcsicmp(value, key) == 0;
+}
+
 /* -------------------------------------------------------------- 数据 */
 
 /* 直接比较关键字段来定位同一条连接，避免每行都格式化出一个 key 字符串 */
@@ -353,10 +360,23 @@ static BOOL MatchProto(const PORT_ENTRY *e, int mode)
     }
 }
 
-/* 逐字段匹配，避免为每行拼一个临时大字符串 */
+/* 逐字段匹配，避免为每行拼一个临时大字符串。
+ * 精确模式只接受完整字段：搜索 80 命中端口 80，不命中 8000、8080 或路径中的 80。 */
 static BOOL MatchFilter(const PORT_ENTRY *e, const WCHAR *key)
 {
     if (!key || !key[0]) return TRUE;
+
+    if (g_exactMatch) {
+        return EqualsI(e->proto, key) ||
+               EqualsI(e->localAddr, key) ||
+               EqualsI(e->portText, key) ||
+               EqualsI(e->remoteAddr, key) ||
+               EqualsI(e->rportText, key) ||
+               EqualsI(e->state, key) ||
+               EqualsI(e->pidText, key) ||
+               EqualsI(e->procName, key) ||
+               EqualsI(PathBaseName(e->procPath), key);
+    }
 
     return ContainsI(e->proto, key) ||
            ContainsI(e->localAddr, key) ||
@@ -537,6 +557,7 @@ static HMENU BuildMainMenu(void)
     AppendMenuW(filter, MF_STRING, IDM_AUTO, L"自动刷新(&A)\tCtrl+Shift+R");
     AppendMenuW(filter, MF_STRING, IDM_LISTEN, L"仅监听端口(&L)");
     AppendMenuW(filter, MF_STRING, IDM_HIDESYS, L"隐藏系统端口(&S)");
+    AppendMenuW(filter, MF_STRING, IDM_EXACT, L"精确匹配(&X)");
     AppendMenuW(filter, MF_SEPARATOR, 0, NULL);
     AppendMenuW(filter, MF_STRING, IDM_CLEAR, L"清除全部筛选(&C)\tEsc");
 
@@ -566,8 +587,9 @@ static void SyncFilterMenu(void)
     CheckMenuItem(filter, IDM_AUTO, MF_BYCOMMAND | (g_autoOn ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(filter, IDM_LISTEN, MF_BYCOMMAND | (g_listenOnly ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(filter, IDM_HIDESYS, MF_BYCOMMAND | (g_hideSystem ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(filter, IDM_EXACT, MF_BYCOMMAND | (g_exactMatch ? MF_CHECKED : MF_UNCHECKED));
 
-    proto = GetSubMenu(filter, 5);
+    proto = GetSubMenu(filter, 6);
     if (proto) {
         CheckMenuRadioItem(proto, IDM_PROTO_ALL, IDM_PROTO_V6,
                            IDM_PROTO_ALL + g_protoFilter, MF_BYCOMMAND);
@@ -601,6 +623,7 @@ static void UpdateStatus(void)
         if (g_protoFilter) k = (size_t)_snwprintf(cond, 160, L"%s", PROTO_TEXT[g_protoFilter]);
         if (g_listenOnly && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"仅监听 · ");
         if (g_hideSystem && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"已隐藏系统端口 · ");
+        if (g_exactMatch && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"精确匹配 · ");
         if (g_autoOn && k < 150) k += (size_t)_snwprintf(cond + k, 160 - k, L"自动刷新 · ");
     }
 
@@ -648,6 +671,8 @@ static const WCHAR *EmptyHintText(void)
     if (g_allCount == 0) return L"当前没有检测到端口占用";
     if (g_hideSystem)
         return L"没有符合当前条件的端口\n当前已隐藏系统关键进程占用的端口\n试试取消「隐藏系统端口」";
+    if (g_exactMatch)
+        return L"没有与搜索内容完全相同的端口、PID、进程名或地址\n可取消「精确匹配」改回包含搜索";
     if (g_listenOnly || g_protoFilter != 0)
         return L"没有符合当前筛选条件的端口\n试试取消「仅监听端口」或切换协议";
     if (g_allCount > 0)
@@ -1875,6 +1900,12 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ApplyView(FALSE);
             return 0;
 
+        case IDM_EXACT:
+            g_exactMatch = !g_exactMatch;
+            SyncFilterMenu();
+            ApplyView(FALSE);
+            return 0;
+
         case IDM_PROTO_ALL:
         case IDM_PROTO_TCP:
         case IDM_PROTO_UDP:
@@ -1940,6 +1971,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_protoFilter = 0;
             g_listenOnly = 0;
             g_hideSystem = 0;
+            g_exactMatch = 0;
             SyncFilterMenu();
             ApplyView(FALSE);
             SetFocus(g_hList);
