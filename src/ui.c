@@ -2093,6 +2093,9 @@ static void UpdateSortMark(void)
     }
 }
 
+/* 选中行底色：取样自默认 accent 的系统选中蓝，与相邻列系统绘制无缝 */
+#define SEL_ROW_BG           RGB(204, 232, 255)
+
 #define HIGHLIGHT_MS 2500   /* 新出现/刚消失的高亮保留时长 */
 
 /* 线性插值两色，ratio 0..256（256=完全取 b） */
@@ -2138,8 +2141,16 @@ static void ApplyRowBg(NMLVCUSTOMDRAW *cd)
                                            LVIS_SELECTED) & LVIS_SELECTED) != 0;
 
     if (!selected && (size_t)cd->nmcd.dwItemSpec < g_viewCount) {
-        cd->clrTextBk = RowBaseBg(&g_view[cd->nmcd.dwItemSpec],
-                                  cd->nmcd.dwItemSpec, FALSE);
+        int row = (int)cd->nmcd.dwItemSpec;
+
+        /* 悬停行铺统一浅蓝高亮（系统的 hover 色会被这里的自绘底色盖掉），
+         * 与状态格的悬停底同色，整行观感一致 */
+        if (ListView_GetHotItem(g_hList) == row) {
+            cd->clrTextBk = RGB(228, 240, 252);
+        } else {
+            cd->clrTextBk = RowBaseBg(&g_view[cd->nmcd.dwItemSpec],
+                                      cd->nmcd.dwItemSpec, FALSE);
+        }
     }
 }
 
@@ -2149,22 +2160,23 @@ static void ApplyRowBg(NMLVCUSTOMDRAW *cd)
  * hover 色同样取不到，用近似值，徽章形态保持稳定）；只有选中行走系统绘制
  * （见 WM_NOTIFY）；UDP 行没有连接状态，只铺底色不画徽章。
  */
-static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e);
-static void DrawStateCell(HDC hdc, RECT rcCell, const PORT_ENTRY *e, DWORD_PTR row)
+static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e, BOOL selected);
+static void DrawStateCell(HDC hdc, RECT rcCell, const PORT_ENTRY *e, DWORD_PTR row, BOOL selected)
 {
     BOOL hot = ListView_GetHotItem(g_hList) == (int)row;
-    COLORREF bg = hot ? RGB(233, 241, 250) : RowBaseBg(e, row, FALSE);
+    COLORREF bg = selected ? SEL_ROW_BG
+                : (hot ? RGB(228, 240, 252) : RowBaseBg(e, row, FALSE));
     HBRUSH brush = CreateSolidBrush(bg);
 
     FillRect(hdc, &rcCell, brush);
     DeleteObject(brush);
-    if (e->stateCode) DrawStateBadge(hdc, rcCell, e);
+    if (e->stateCode) DrawStateBadge(hdc, rcCell, e, selected);
 }
 
 /*
- * 状态徽章：浅底圆角块 + 深色字 + 前置圆点。
+ * 状态徽章：浅底圆角块 + 深色字 + 前置圆点；选中行的蓝底上徽章翻白底。
  */
-static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e)
+static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e, BOOL selected)
 {
     STATE_BADGE_COLORS colors;
     const WCHAR *text;
@@ -2205,7 +2217,7 @@ static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e)
     if (rcBadge.right > rcCell.right - S(g_hwndMain, 2))
         rcBadge.right = rcCell.right - S(g_hwndMain, 2);
 
-    brush = CreateSolidBrush(colors.bg);
+    brush = CreateSolidBrush(selected ? RGB(255, 255, 255) : colors.bg);
     pen = CreatePen(PS_NULL, 0, 0);
     oldBrush = SelectObject(hdc, brush);
     oldPen = SelectObject(hdc, pen);
@@ -2416,16 +2428,6 @@ static void ApplyView(BOOL keepViewport)
     } else if (newSel < 0 && top > 0 && g_viewCount) {
         if ((size_t)top >= g_viewCount) top = (int)g_viewCount - 1;
         ListView_EnsureVisible(g_hList, top, TRUE);
-    }
-
-    /*
-     * 终局兜底：走到这里仍无选中（首屏、筛选把选中行滤掉、恢复失败被清除）
-     * 就选中第一行，详情栏永远有内容。判断按控件最终状态，而不是中间变量
-     * haveSel——否则「有旧选中但已被筛掉」的路径会漏掉。
-     */
-    if (g_viewCount && ListView_GetNextItem(g_hList, -1, LVNI_SELECTED) < 0) {
-        ListView_SetItemState(g_hList, 0, LVIS_SELECTED | LVIS_FOCUSED,
-                              LVIS_SELECTED | LVIS_FOCUSED);
     }
 
     InvalidateRect(g_hList, NULL, FALSE);
@@ -4169,19 +4171,14 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                                           LVIS_SELECTED) & LVIS_SELECTED) != 0;
 
                         /*
-                         * 只有选中行交还系统画：Win11 的选中底色由系统按用户
-                         * accent 动态生成，主题的 FILLCOLOR 属性只返回白色
-                         * （GetThemeColor 还是成功返回），自绘必然与相邻列色差。
-                         * 悬停行必须继续画徽章——若交还系统，鼠标扫过时徽章
-                         * 会突然退化成纯文字，整列形态跳变。
+                         * 全部行（含选中/悬停）都整格自绘，徽章形态全程稳定——
+                         * 交还系统的尝试已否决：悬停时徽章会退化成纯文字。
+                         * 选中底色用取样校准的常量（默认 accent 下与系统选中
+                         * 色一致，见 SEL_ROW_BG）。
                          */
-                        if (sel) {
-                            cd->clrText = CLR_DEFAULT;
-                            return CDRF_DODEFAULT;
-                        }
                         DrawStateCell(cd->nmcd.hdc, cd->nmcd.rc,
                                       &g_view[cd->nmcd.dwItemSpec],
-                                      cd->nmcd.dwItemSpec);
+                                      cd->nmcd.dwItemSpec, sel);
                         return CDRF_SKIPDEFAULT;
                     }
                     ApplyRowBg(cd);
