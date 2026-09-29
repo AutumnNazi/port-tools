@@ -628,14 +628,14 @@ BOOL ProcIsElevated(void)
     return elevated;
 }
 
-BOOL ProcElevate(HWND hwnd)
+BOOL ProcElevate(HWND hwnd, LPCWSTR params)
 {
     WCHAR exe[MAX_PATH];
     HINSTANCE r;
 
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FALSE;
 
-    r = ShellExecuteW(hwnd, L"runas", exe, NULL, NULL, SW_SHOWNORMAL);
+    r = ShellExecuteW(hwnd, L"runas", exe, params, NULL, SW_SHOWNORMAL);
     return (INT_PTR)r > 32;
 }
 

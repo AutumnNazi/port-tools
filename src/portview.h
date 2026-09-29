@@ -30,6 +30,11 @@ typedef struct {
     WCHAR portText[16];
     WCHAR rportText[16];
     WCHAR pidText[16];
+    /* 界面高亮用（ports.c 构造时整块清零，值由 ui.c 维护）：
+     * appearTick = 首次出现在列表的时刻，非 0 时绿底渐退；
+     * dieTick    = 已从端口表消失的时刻，非 0 时红底渐退并在超时后移出显示。 */
+    DWORD appearTick;
+    DWORD dieTick;
 } PORT_ENTRY;
 
 /* 进程快照项（仅名字，取自 Toolhelp，开销极低） */
@@ -89,7 +94,8 @@ PROC_KILL_RESULT ProcTerminate(DWORD pid, const FILETIME *expectCreate);
 PROC_KILL_RESULT ProcTerminateTree(DWORD pid, const FILETIME *expectCreate);
 BOOL ProcOpenFileLocation(HWND hwnd, const WCHAR *path);
 BOOL ProcIsElevated(void);
-BOOL ProcElevate(HWND hwnd);
+/* params: 传给提权后新实例的命令行参数（筛选条件等），可为 NULL */
+BOOL ProcElevate(HWND hwnd, LPCWSTR params);
 BOOL ProcEnableDebugPriv(void);
 
 /* ---- ui.c ---- */

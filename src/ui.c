@@ -1529,7 +1529,7 @@ static BOOL ConfirmElevate(HWND hwnd)
         return FALSE;
     }
 
-    if (ProcElevate(hwnd)) {
+    if (ProcElevate(hwnd, params)) {
         PostMessage(g_hwndMain, WM_CLOSE, 0, 0);
         return TRUE;
     }
