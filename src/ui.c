@@ -2,6 +2,7 @@
 #include "portview.h"
 
 #include <uxtheme.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #define MAIN_CLASS   L"PortViewMainWindow"
 #define DETAIL_CLASS L"PortViewDetailWindow"
@@ -26,17 +28,14 @@
 #define ID_LBL_NAME    1023
 #define ID_LBL_KEY     1024
 #define ID_BTN_REFRESH 1002
-#define ID_CHK_AUTO    1003
-#define ID_BTN_ADMIN   1004
 #define ID_LIST        1005
 #define ID_STATUS      1006
 #define ID_TIMER       1007
-#define ID_CB_PROTO    1008
-#define ID_CHK_LISTEN  1009
-#define ID_INFOBAR     1010    /* 底部选中项详情栏 */
-#define ID_CHK_SYS     1011    /* 隐藏系统关键进程占用的端口 */
 #define ID_FILTER_TIMER 1012   /* 筛选输入防抖 */
 #define ID_KILL_TIMER  1013    /* 结束进程期间的界面心跳 */
+#define ID_TOOLBAR     1017    /* 顶栏工具条 */
+#define ID_BTN_CLEAR   1018    /* 查询区清除按钮 */
+#define ID_HL_TIMER    1019    /* 新增/消失高亮的渐退重绘 */
 
 #define IDM_OPEN_LOC   2001
 #define IDM_DETAIL     2002
@@ -48,6 +47,8 @@
 #define IDM_FILTER_SEL 2008
 #define IDM_CLEAR      2009    /* Esc: 清空筛选框与所有结构化条件 */
 #define IDM_ELEVATE    2010    /* Ctrl+Shift+E: 提权重启 */
+#define IDM_TOPMOST    2011    /* 工具条图钉: 窗口置顶 */
+#define IDM_EXPORT     2012    /* Ctrl+S: 导出当前视图为 CSV */
 
 /* 菜单栏「筛选」下的命令 */
 #define IDM_AUTO       2020
@@ -100,7 +101,7 @@ enum {
     TXT_CUE_PORT, TXT_CUE_PID, TXT_CUE_NAME, TXT_CUE_KEY,
     /* 窗口标题与列表列头 */
     TXT_WINDOW, TXT_DETAIL_TITLE,
-    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_LPORT, TXT_COL_RADDR, TXT_COL_RPORT,
+    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_RADDR,
     TXT_COL_STATE, TXT_COL_PID, TXT_COL_NAME, TXT_COL_PATH,
     /* 连接状态 */
     TXT_STATE_CLOSED, TXT_STATE_LISTEN, TXT_STATE_SYN_SENT, TXT_STATE_SYN_RCVD,
@@ -109,7 +110,17 @@ enum {
     TXT_STATE_UNKNOWN,
     /* 状态栏 */
     TXT_BAR_LOADING, TXT_BAR_FAILED, TXT_BAR_SUMMARY, TXT_BAR_PARTIAL, TXT_BAR_REFRESHING,
-    TXT_BAR_KILLING, TXT_BAR_ADMIN, TXT_BAR_STD_USER,
+    TXT_BAR_KILLING, TXT_BAR_HINT,
+    /* 顶栏工具条：菜单文案带助记符与快捷键后缀，按钮上不能用，单独一份纯文本 */
+    TXT_TBAR_REFRESH, TXT_TBAR_AUTO, TXT_TBAR_LISTEN, TXT_TBAR_HIDESYS, TXT_TBAR_EXACT,
+    TXT_TBAR_ADMIN, TXT_TBAR_ELEVATE, TXT_TBAR_FILTER, TXT_TBAR_LANG, TXT_TBAR_TOPMOST,
+    /* 工具条悬停提示 */
+    TXT_TIP_REFRESH, TXT_TIP_AUTO, TXT_TIP_LISTEN, TXT_TIP_HIDESYS, TXT_TIP_EXACT,
+    TXT_TIP_TOPMOST, TXT_TIP_ADMIN, TXT_TIP_ELEVATE, TXT_TIP_FILTER, TXT_TIP_LANG,
+    /* 行悬停信息与服务名、CSV 导出 */
+    TXT_TIP_SRV, TXT_TIP_NOPATH,
+    TXT_CTX_EXPORT, TXT_CSV_FILTER, TXT_CSV_FILTER_ALL, TXT_CSV_TITLE,
+    TXT_MB_EXPORTED, TXT_MB_EXPORT_FAIL,
     TXT_COND_TCP, TXT_COND_UDP, TXT_COND_V4, TXT_COND_V6,
     TXT_COND_LISTEN, TXT_COND_HIDEP, TXT_COND_EXACT, TXT_COND_AUTO,
     /* 空结果提示 */
@@ -118,8 +129,6 @@ enum {
     /* 右键菜单 */
     TXT_CTX_DETAIL, TXT_CTX_OPEN_LOC, TXT_CTX_KILL, TXT_CTX_KILL_TREE,
     TXT_CTX_COPY_PATH, TXT_CTX_COPY_PID, TXT_CTX_COPY_ROW, TXT_CTX_FILTER_SEL, TXT_CTX_REFRESH,
-    /* 底部详情栏 */
-    TXT_INFO_NONE, TXT_INFO_UNKNOWN_PROC, TXT_INFO_LINE, TXT_INFO_NOPATH,
     /* 消息框 */
     TXT_MB_ELEVATE_BODY, TXT_MB_ELEVATE_TITLE, TXT_MB_ELEVATE_FAIL, TXT_MB_HINT,
     TXT_MB_KILL_BUSY, TXT_MB_WAIT, TXT_MB_OOM, TXT_MB_FAIL, TXT_MB_START_FAIL,
@@ -156,6 +165,62 @@ static void LoadLanguagePreference(void)
     RegCloseKey(key);
 }
 
+/*
+ * 命令行初始筛选：PortView.exe --port 8080 --pid 1234 --name "nginx.exe"
+ * --key "文本" --proto 0..4 --listen 0|1 --hidesys 0|1 --exact 0|1 --auto 0|1。
+ * 提权重启时把当前筛选原样带给新实例，视图不断档；快捷方式/脚本也能直接拉起即筛。
+ */
+/* 提权/快捷方式传入的初始筛选：--port/--pid/--name/--key 与各开关 */
+static WCHAR g_argPort[32], g_argPid[32], g_argName[128], g_argKey[256];
+static int g_argProto = -1, g_argListen = -1, g_argHidesys = -1, g_argExact = -1, g_argAuto = -1;
+
+static void ParseCommandLineArgs(void)
+{
+    int n = 0, i;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &n);
+
+    if (!argv) return;
+    for (i = 1; i + 1 < n; ++i) {
+        if (!wcscmp(argv[i], L"--port")) {
+            ++i; _snwprintf(g_argPort, 32, L"%s", argv[i]);
+        } else if (!wcscmp(argv[i], L"--pid")) {
+            ++i; _snwprintf(g_argPid, 32, L"%s", argv[i]);
+        } else if (!wcscmp(argv[i], L"--name")) {
+            ++i; _snwprintf(g_argName, 128, L"%s", argv[i]);
+        } else if (!wcscmp(argv[i], L"--key")) {
+            ++i; _snwprintf(g_argKey, 256, L"%s", argv[i]);
+        } else if (!wcscmp(argv[i], L"--proto")) {
+            ++i; g_argProto = _wtoi(argv[i]);
+        } else if (!wcscmp(argv[i], L"--listen")) {
+            ++i; g_argListen = _wtoi(argv[i]);
+        } else if (!wcscmp(argv[i], L"--hidesys")) {
+            ++i; g_argHidesys = _wtoi(argv[i]);
+        } else if (!wcscmp(argv[i], L"--exact")) {
+            ++i; g_argExact = _wtoi(argv[i]);
+        } else if (!wcscmp(argv[i], L"--auto")) {
+            ++i; g_argAuto = _wtoi(argv[i]);
+        }
+    }
+    LocalFree(argv);
+}
+
+/* 参数值包引号并转义内部引号，按 CommandLineToArgvW 的解析规则 */
+static void QuoteArg(WCHAR *out, size_t cch, const WCHAR *value)
+{
+    size_t i = 0;
+    WCHAR *p = out;
+
+    if (cch < 3) return;
+    *p++ = L'"';
+    for (; *value && p < out + cch - 3; ++value) {
+        if (*value == L'"' && p < out + cch - 4) *p++ = L'\\';
+        *p++ = *value;
+    }
+    *p++ = L'"';
+    *p = 0;
+    (void)i;
+}
+
 static void SaveLanguagePreference(void)
 {
     HKEY key;
@@ -182,8 +247,7 @@ static const WCHAR *const TEXT_EN[TXT_COUNT] = {
     [TXT_CUE_KEY] = L"Address, path or state",
     [TXT_WINDOW] = L"PortView — Port Inspector", [TXT_DETAIL_TITLE] = L"Process Details",
     [TXT_COL_PROTO] = L"Protocol", [TXT_COL_LADDR] = L"Local Address",
-    [TXT_COL_LPORT] = L"Local Port", [TXT_COL_RADDR] = L"Remote Address",
-    [TXT_COL_RPORT] = L"Remote Port", [TXT_COL_STATE] = L"State", [TXT_COL_PID] = L"PID",
+    [TXT_COL_RADDR] = L"Remote Address", [TXT_COL_STATE] = L"State", [TXT_COL_PID] = L"PID",
     [TXT_COL_NAME] = L"Process", [TXT_COL_PATH] = L"Image Path",
     [TXT_STATE_CLOSED] = L"Closed", [TXT_STATE_LISTEN] = L"Listening",
     [TXT_STATE_SYN_SENT] = L"SYN Sent", [TXT_STATE_SYN_RCVD] = L"SYN Received",
@@ -196,8 +260,30 @@ static const WCHAR *const TEXT_EN[TXT_COUNT] = {
     [TXT_BAR_FAILED] = L"Failed to read port tables · showing the previous result · %02d:%02d:%02d",
     [TXT_BAR_SUMMARY] = L"%s%s%u connections · %u listening · %u shown · %s%02d:%02d:%02d",
     [TXT_BAR_PARTIAL] = L"Partial results · ", [TXT_BAR_REFRESHING] = L"Refreshing · ",
-    [TXT_BAR_KILLING] = L"Killing process…", [TXT_BAR_ADMIN] = L"Administrator",
-    [TXT_BAR_STD_USER] = L"Standard user · click to elevate",
+    [TXT_BAR_KILLING] = L"Killing process…",
+    [TXT_BAR_HINT] = L"F5 refresh · Esc clear · double-click for details",
+    [TXT_TBAR_REFRESH] = L"Refresh", [TXT_TBAR_AUTO] = L"Auto Refresh",
+    [TXT_TBAR_LISTEN] = L"Listening Only", [TXT_TBAR_HIDESYS] = L"Hide System Ports",
+    [TXT_TBAR_EXACT] = L"Exact Match", [TXT_TBAR_ADMIN] = L"Admin",
+    [TXT_TBAR_ELEVATE] = L"Elevate", [TXT_TBAR_FILTER] = L"Filter",
+    [TXT_TBAR_LANG] = L"Language", [TXT_TBAR_TOPMOST] = L"On Top",
+    [TXT_TIP_REFRESH] = L"Refresh the port list (F5)",
+    [TXT_TIP_AUTO] = L"Refresh the port list every 3 seconds",
+    [TXT_TIP_LISTEN] = L"Show listening ports only",
+    [TXT_TIP_HIDESYS] = L"Hide ports held by key system processes",
+    [TXT_TIP_EXACT] = L"Match whole fields when searching",
+    [TXT_TIP_TOPMOST] = L"Keep the window above all others",
+    [TXT_TIP_ADMIN] = L"Running with administrator privilege",
+    [TXT_TIP_ELEVATE] = L"Restart as administrator to manage system processes",
+    [TXT_TIP_FILTER] = L"Filter and protocol menu",
+    [TXT_TIP_LANG] = L"Switch the interface language",
+    [TXT_TIP_SRV] = L"Service: %s",
+    [TXT_TIP_NOPATH] = L"(image path unavailable, may need administrator)",
+    [TXT_CTX_EXPORT] = L"&Export as CSV...",
+    [TXT_CSV_FILTER] = L"CSV files", [TXT_CSV_FILTER_ALL] = L"All files",
+    [TXT_CSV_TITLE] = L"Export Port List",
+    [TXT_MB_EXPORTED] = L"Exported %u connections:\n%s",
+    [TXT_MB_EXPORT_FAIL] = L"Export failed: unable to write the file.",
     [TXT_COND_TCP] = L"TCP only · ", [TXT_COND_UDP] = L"UDP only · ",
     [TXT_COND_V4] = L"IPv4 only · ", [TXT_COND_V6] = L"IPv6 only · ",
     [TXT_COND_LISTEN] = L"Listening only · ", [TXT_COND_HIDEP] = L"System ports hidden · ",
@@ -218,10 +304,6 @@ static const WCHAR *const TEXT_EN[TXT_COUNT] = {
     [TXT_CTX_COPY_PATH] = L"&Copy Image Path", [TXT_CTX_COPY_PID] = L"Copy &PID",
     [TXT_CTX_COPY_ROW] = L"Copy &Row", [TXT_CTX_FILTER_SEL] = L"Filter by This &Process",
     [TXT_CTX_REFRESH] = L"&Refresh\tF5",
-    [TXT_INFO_NONE] = L"  Select a row to see what holds the port",
-    [TXT_INFO_UNKNOWN_PROC] = L"(unknown process)",
-    [TXT_INFO_LINE] = L" %s  PID %u  %s",
-    [TXT_INFO_NOPATH] = L" %s  PID %u  (image path unavailable, may need administrator)",
     [TXT_MB_ELEVATE_BODY] = L"Running as administrator lets you inspect and end system-level processes.\nContinue?",
     [TXT_MB_ELEVATE_TITLE] = L"Elevation",
     [TXT_MB_ELEVATE_FAIL] = L"Elevation failed or was cancelled.",
@@ -283,8 +365,8 @@ static const WCHAR *const TEXT_ZH[TXT_COUNT] = {
     [TXT_CUE_PORT] = L"80", [TXT_CUE_PID] = L"1234", [TXT_CUE_NAME] = L"nginx.exe",
     [TXT_CUE_KEY] = L"地址、路径或状态",
     [TXT_WINDOW] = L"端口占用查看器 — PortView", [TXT_DETAIL_TITLE] = L"进程详情",
-    [TXT_COL_PROTO] = L"协议", [TXT_COL_LADDR] = L"本地地址", [TXT_COL_LPORT] = L"本地端口",
-    [TXT_COL_RADDR] = L"远程地址", [TXT_COL_RPORT] = L"远程端口", [TXT_COL_STATE] = L"状态",
+    [TXT_COL_PROTO] = L"协议", [TXT_COL_LADDR] = L"本地地址",
+    [TXT_COL_RADDR] = L"远程地址", [TXT_COL_STATE] = L"状态",
     [TXT_COL_PID] = L"PID", [TXT_COL_NAME] = L"进程", [TXT_COL_PATH] = L"映像路径",
     [TXT_STATE_CLOSED] = L"已关闭", [TXT_STATE_LISTEN] = L"监听",
     [TXT_STATE_SYN_SENT] = L"SYN 已发送", [TXT_STATE_SYN_RCVD] = L"SYN 已接收",
@@ -297,8 +379,30 @@ static const WCHAR *const TEXT_ZH[TXT_COUNT] = {
     [TXT_BAR_FAILED] = L"读取端口表失败 · 显示的是上一次的结果 · %02d:%02d:%02d",
     [TXT_BAR_SUMMARY] = L"%s%s共 %u 条连接 · 监听端口 %u 个 · 显示 %u 条 · %s%02d:%02d:%02d",
     [TXT_BAR_PARTIAL] = L"部分结果 · ", [TXT_BAR_REFRESHING] = L"正在刷新 · ",
-    [TXT_BAR_KILLING] = L"正在结束进程…", [TXT_BAR_ADMIN] = L"管理员",
-    [TXT_BAR_STD_USER] = L"标准用户 · 点击提权",
+    [TXT_BAR_KILLING] = L"正在结束进程…",
+    [TXT_BAR_HINT] = L"F5 刷新 · Esc 清除筛选 · 双击看详情",
+    [TXT_TBAR_REFRESH] = L"刷新", [TXT_TBAR_AUTO] = L"自动刷新",
+    [TXT_TBAR_LISTEN] = L"仅监听", [TXT_TBAR_HIDESYS] = L"隐藏系统端口",
+    [TXT_TBAR_EXACT] = L"精确匹配", [TXT_TBAR_ADMIN] = L"管理员",
+    [TXT_TBAR_ELEVATE] = L"提权", [TXT_TBAR_FILTER] = L"筛选",
+    [TXT_TBAR_LANG] = L"语言", [TXT_TBAR_TOPMOST] = L"置顶",
+    [TXT_TIP_REFRESH] = L"刷新端口列表（F5）",
+    [TXT_TIP_AUTO] = L"每 3 秒自动刷新端口列表",
+    [TXT_TIP_LISTEN] = L"只显示处于监听状态的端口",
+    [TXT_TIP_HIDESYS] = L"隐藏系统关键进程占用的端口",
+    [TXT_TIP_EXACT] = L"搜索时按完整字段匹配",
+    [TXT_TIP_TOPMOST] = L"让窗口保持在所有窗口最前",
+    [TXT_TIP_ADMIN] = L"当前以管理员权限运行",
+    [TXT_TIP_ELEVATE] = L"以管理员身份重启，管理系统级进程",
+    [TXT_TIP_FILTER] = L"筛选条件与协议菜单",
+    [TXT_TIP_LANG] = L"切换界面语言",
+    [TXT_TIP_SRV] = L"服务：%s",
+    [TXT_TIP_NOPATH] = L"（映像路径不可用，可能需要管理员权限）",
+    [TXT_CTX_EXPORT] = L"导出为 CSV(&E)...",
+    [TXT_CSV_FILTER] = L"CSV 文件", [TXT_CSV_FILTER_ALL] = L"所有文件",
+    [TXT_CSV_TITLE] = L"导出端口列表",
+    [TXT_MB_EXPORTED] = L"已导出 %u 条连接：\n%s",
+    [TXT_MB_EXPORT_FAIL] = L"导出失败：无法写入文件。",
     [TXT_COND_TCP] = L"仅 TCP · ", [TXT_COND_UDP] = L"仅 UDP · ",
     [TXT_COND_V4] = L"仅 IPv4 · ", [TXT_COND_V6] = L"仅 IPv6 · ",
     [TXT_COND_LISTEN] = L"仅监听 · ", [TXT_COND_HIDEP] = L"已隐藏系统端口 · ",
@@ -315,10 +419,6 @@ static const WCHAR *const TEXT_ZH[TXT_COUNT] = {
     [TXT_CTX_COPY_PATH] = L"复制映像路径(&C)", [TXT_CTX_COPY_PID] = L"复制 PID",
     [TXT_CTX_COPY_ROW] = L"复制整行", [TXT_CTX_FILTER_SEL] = L"按该进程名过滤(&F)",
     [TXT_CTX_REFRESH] = L"刷新(&R)\tF5",
-    [TXT_INFO_NONE] = L"　选中一行查看占用详情",
-    [TXT_INFO_UNKNOWN_PROC] = L"(未知进程)",
-    [TXT_INFO_LINE] = L"　%s　PID %u　%s",
-    [TXT_INFO_NOPATH] = L"　%s　PID %u　（映像路径不可用，可能需要管理员权限）",
     [TXT_MB_ELEVATE_BODY] = L"以管理员身份重启后可以查看并结束系统级进程。\n是否继续？",
     [TXT_MB_ELEVATE_TITLE] = L"提权",
     [TXT_MB_ELEVATE_FAIL] = L"提权失败或已被取消。",
@@ -369,27 +469,31 @@ static const WCHAR *Tr(int id)
     return text ? text : L"";
 }
 
+/*
+ * 地址与端口合并为一列（如 *:3306、192.168.2.176:52881）：端口查询场景里
+ * 「地址:端口」本来就是一个心智单元，拆两列反而多一次目光跳转。
+ * UDP 与监听行没有远程端点，远程列显示 —，不再留一截空白桩。
+ */
 enum {
-    COL_PROTO = 0, COL_LADDR, COL_LPORT, COL_RADDR,
-    COL_RPORT, COL_STATE, COL_PID, COL_NAME, COL_PATH, COL_COUNT
+    COL_PROTO = 0, COL_LADDR, COL_RADDR,
+    COL_STATE, COL_PID, COL_NAME, COL_PATH, COL_COUNT
 };
 
 /*
- * 列宽按信息量分配，不平均分。地址列在通配监听时只剩一个 *，却占着 140px；
- * 而映像路径是判断「谁占了端口」最该看的一列，反而被前面几列挤出可视区。
- * 路径列不写死宽度，由 LayoutColumns 把窗口剩下的宽度全给它。
- * 端口列按英文列头（Remote Port）取宽，中文列头更短，不会被截。
+ * 列宽按信息量分配，不平均分。合并后的地址列承载「地址:端口」，给足宽度；
+ * 而映像路径是判断「谁占了端口」最该看的一列，不写死宽度，
+ * 由 LayoutColumns 把窗口剩下的宽度全给它。
  */
 static const int COL_WIDTHS[COL_COUNT] = {
-    56, 104, 76, 104, 88, 88, 64, 150, 240
+    56, 168, 168, 96, 72, 150, 240
 };
 
 #define COL_PATH_MIN 180   /* 路径列最小宽度，窗口再窄也不低于此 */
 
 /* 列头文案与 COL_* 一一对应，换语言时按列号取 */
 static const int COL_TEXT[COL_COUNT] = {
-    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_LPORT, TXT_COL_RADDR, TXT_COL_RPORT,
-    TXT_COL_STATE, TXT_COL_PID, TXT_COL_NAME, TXT_COL_PATH
+    TXT_COL_PROTO, TXT_COL_LADDR, TXT_COL_RADDR, TXT_COL_STATE,
+    TXT_COL_PID, TXT_COL_NAME, TXT_COL_PATH
 };
 
 static HINSTANCE g_hInst;
@@ -403,20 +507,19 @@ static HWND g_hLblPort;
 static HWND g_hLblPid;
 static HWND g_hLblName;
 static HWND g_hLblKey;
-static HWND g_hBtnRefresh;
-static HBRUSH g_hQueryBrush;
-static HBRUSH g_hQueryLineBrush;
 
 /*
  * 查询区输入框的描边。控件自己那圈框（主题的或 WS_BORDER 的）在调整文字区之后
  * 会露在描边里面，成了「框里还有一层框」，所以输入框不带任何边框样式，
  * 描边统一在 WM_PAINT 里等控件画完再补上。
  */
-#define QUERY_BAND_RGB       RGB(245, 248, 252)
-#define QUERY_LINE_RGB       RGB(223, 228, 235)
-#define QUERY_BORDER         RGB(208, 213, 219)
-#define QUERY_BORDER_HOT     RGB(156, 165, 176)
-#define QUERY_BORDER_FOCUS   RGB(47, 84, 150)
+#define ACCENT               RGB(37, 99, 235)   /* 主色：焦点描边、切换态、排序箭头 */
+#define ACCENT_SOFT          RGB(219, 231, 255) /* 主色浅底：切换按钮激活态 */
+#define CARD_BORDER          RGB(226, 232, 240) /* 卡片描边与分隔线 */
+#define LABEL_TEXT_RGB       RGB(75, 85, 99)    /* 查询区标签灰 */
+#define QUERY_BORDER         RGB(203, 213, 225)
+#define QUERY_BORDER_HOT     RGB(148, 163, 184)
+#define QUERY_BORDER_FOCUS   ACCENT
 #define QUERY_HOVER          1
 
 static COLORREF QueryBorderColor(HWND hwnd)
@@ -534,10 +637,622 @@ static void InitQueryEdit(HWND edit, UINT_PTR id)
     SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 6));
     SetWindowSubclass(edit, QueryEditProc, id, 0);
 }
-static HWND g_hInfoBar;
+static HWND g_hBtnClear;    /* 查询区清除按钮（自绘小方块） */
 static HWND g_hStatus;
+static HWND g_hToolbar;     /* 顶栏工具条：高频筛选开关 + 菜单入口 */
+static HMENU g_hMenuBar;    /* 不再挂到窗口上，由工具条的「筛选/语言」按钮弹出 */
 static HFONT g_hFont;
-static HIMAGELIST g_hRowSpacer;
+static HIMAGELIST g_hIcons; /* 进程图标；列表行高跟随图标高度 */
+
+/* 进程图标按路径（无路径时按进程名）缓存：同一 exe 反复出现在多行，只提取一次 */
+typedef struct {
+    WCHAR key[MAX_PATH];
+    int index;
+} ICON_CACHE_ENTRY;
+#define ICON_CACHE_MAX 160
+static ICON_CACHE_ENTRY g_iconCache[ICON_CACHE_MAX];
+static int g_iconCacheCount;
+
+/* 顶栏的两个结构化筛选，与文本框是「与」的关系：文本框管模糊匹配，这两个管精确范围。
+ * 工具条按钮与菜单命令都只翻这几面旗子，绘制与筛选统一从这里读。 */
+static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
+static int g_listenOnly = 0;    /* 1=只看监听端口 */
+static int g_hideSystem = 0;    /* 1=隐藏系统关键进程占用的端口 */
+static int g_exactMatch = 0;    /* 1=搜索框按完整字段匹配 */
+static BOOL g_autoOn = TRUE;    /* 自动刷新勾选框状态 */
+
+/* ------------------------------------------------------------ 顶栏工具条 */
+
+#define TOOLBAR_CLASS L"PortViewToolBar"
+#define TOOLBAR_H     40   /* 96dpi 基准，实际高度走 S() */
+
+/* 按钮顺序即布局顺序；ADMIN/FILTER/LANG 由布局函数靠右放 */
+enum {
+    TBB_REFRESH = 0, TBB_AUTO, TBB_LISTEN, TBB_HIDESYS, TBB_EXACT, TBB_PIN,
+    TBB_ADMIN, TBB_FILTER, TBB_LANG, TBB_COUNT
+};
+/* 按钮为纯文字：切换态用底色区分，不再配图标，视觉更干净 */
+
+/* 窗口置顶开关（工具条图钉按钮） */
+static BOOL g_topmost = FALSE;
+
+/* 不引 windowsx.h，鼠标坐标就地取：lParam 低/高字按有符号短整处理 */
+#define TB_PT_X(lp) ((int)(short)LOWORD(lp))
+#define TB_PT_Y(lp) ((int)(short)HIWORD(lp))
+
+/* DPI 缩放在「基础工具」区才定义，工具条的绘制与布局先用到 */
+static UINT GetDpiOf(HWND hwnd);
+static int S(HWND hwnd, int v);
+
+static RECT g_tbRect[TBB_COUNT];   /* 各按钮当前像素矩形，绘制与命中共用 */
+static int g_tbHover = -1;
+static int g_tbPressed = -1;
+static HFONT g_tbFont;             /* 主窗口 DPICHANGED 重建字体后经 WM_SETFONT 同步进来 */
+static HWND g_hTip;                /* 工具条悬停提示 */
+
+/* 每个按钮的文字（按当前语言即时取） */
+static int TbTextId(int btn)
+{
+    switch (btn) {
+    case TBB_REFRESH: return TXT_TBAR_REFRESH;
+    case TBB_AUTO:    return TXT_TBAR_AUTO;
+    case TBB_LISTEN:  return TXT_TBAR_LISTEN;
+    case TBB_HIDESYS: return TXT_TBAR_HIDESYS;
+    case TBB_EXACT:   return TXT_TBAR_EXACT;
+    case TBB_PIN:     return TXT_TBAR_TOPMOST;
+    case TBB_ADMIN:   return ProcIsElevated() ? TXT_TBAR_ADMIN : TXT_TBAR_ELEVATE;
+    case TBB_FILTER:  return TXT_TBAR_FILTER;
+    case TBB_LANG:    return TXT_TBAR_LANG;
+    }
+    return TXT_TBAR_FILTER;
+}
+
+/* 悬停提示文案 */
+static int TbTipId(int btn)
+{
+    switch (btn) {
+    case TBB_REFRESH: return TXT_TIP_REFRESH;
+    case TBB_AUTO:    return TXT_TIP_AUTO;
+    case TBB_LISTEN:  return TXT_TIP_LISTEN;
+    case TBB_HIDESYS: return TXT_TIP_HIDESYS;
+    case TBB_EXACT:   return TXT_TIP_EXACT;
+    case TBB_PIN:     return TXT_TIP_TOPMOST;
+    case TBB_ADMIN:   return ProcIsElevated() ? TXT_TIP_ADMIN : TXT_TIP_ELEVATE;
+    case TBB_FILTER:  return TXT_TIP_FILTER;
+    case TBB_LANG:    return TXT_TIP_LANG;
+    }
+    return TXT_TIP_FILTER;
+}
+
+/* 切换类按钮的激活态跟全局筛选变量走；其余按钮没有激活态 */
+static int TbToggled(int btn)
+{
+    switch (btn) {
+    case TBB_AUTO:    return g_autoOn;
+    case TBB_LISTEN:  return g_listenOnly;
+    case TBB_HIDESYS: return g_hideSystem;
+    case TBB_EXACT:   return g_exactMatch;
+    case TBB_PIN:     return g_topmost;
+    }
+    return 0;
+}
+
+/* 按钮里的下拉小三角（筛选/语言） */
+static void DrawDropDown(HWND hwnd, HDC hdc, int x, int y, COLORREF color)
+{
+    HGDIOBJ oldBrush, oldPen;
+    POINT pts[3];
+    COLORREF c = color;
+
+    pts[0].x = x;            pts[0].y = y;
+    pts[1].x = x + S(hwnd, 8); pts[1].y = y;
+    pts[2].x = x + S(hwnd, 4); pts[2].y = y + S(hwnd, 4);
+    oldBrush = SelectObject(hdc, CreateSolidBrush(c));
+    oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Polygon(hdc, pts, 3);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+}
+
+/* 圆角矩形底（无边框）：切换态/悬停态的按钮底色 */
+static void FillRoundRect(HWND hwnd, HDC hdc, RECT rc, int radius, COLORREF color)
+{
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ oldBrush, oldPen;
+    HPEN pen = CreatePen(PS_NULL, 0, 0);
+
+    oldBrush = SelectObject(hdc, brush);
+    oldPen = SelectObject(hdc, pen);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+/* ------------------------------------------------------------ 详情窗按钮 */
+
+/*
+ * 详情窗按钮自绘：白底圆角 + 浅描边，悬停浅灰；「结束进程」用红色描边与
+ * 红字标记危险操作，悬停浅红。原来的系统凸起按钮和改造后的界面风格脱节。
+ */
+#define BTN_KILL_FG   RGB(201, 48, 44)
+#define BTN_KILL_HOT  RGB(251, 236, 234)
+
+static LRESULT CALLBACK DetailBtnProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR id, DWORD_PTR ref)
+{
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (!(GetWindowLongPtr(hwnd, GWLP_USERDATA) & 1)) {
+            TRACKMOUSEEVENT tme;
+            ZeroMemory(&tme, sizeof(tme));
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 1);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, DetailBtnProc, id);
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static void DrawDetailButton(DRAWITEMSTRUCT *dis, HFONT font)
+{
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    int kill = (dis->CtlID == D_BTN_KILL);
+    int hot = (int)GetWindowLongPtr(dis->hwndItem, GWLP_USERDATA) & 1;
+    COLORREF fg = kill ? BTN_KILL_FG : RGB(31, 41, 55);
+    COLORREF border = kill ? BTN_KILL_FG : CARD_BORDER;
+    WCHAR text[128];
+    HFONT oldFont;
+    int oldBk;
+    COLORREF oldText;
+    HPEN pen;
+    HGDIOBJ oldPen, oldBrush;
+
+    if (hot) {
+        HBRUSH b = CreateSolidBrush(kill ? BTN_KILL_HOT : RGB(233, 238, 246));
+        FillRect(hdc, &rc, b);
+        DeleteObject(b);
+    } else {
+        HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
+        FillRect(hdc, &rc, b);
+        DeleteObject(b);
+    }
+    pen = CreatePen(PS_SOLID, 1, hot && kill ? BTN_KILL_FG : border);
+    oldPen = SelectObject(hdc, pen);
+    oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    RoundRect(hdc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, S(dis->hwndItem, 12), S(dis->hwndItem, 12));
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+
+    GetWindowTextW(dis->hwndItem, text, 128);
+    oldFont = SelectObject(hdc, font ? font : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+    oldBk = SetBkMode(hdc, TRANSPARENT);
+    oldText = SetTextColor(hdc, fg);
+    DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SetTextColor(hdc, oldText);
+    SetBkMode(hdc, oldBk);
+    SelectObject(hdc, oldFont);
+}
+
+/*
+ * 布局：左组依次排刷新与三个筛选开关；右组（提权/筛选/语言）从右边缘往左收。
+ * 窗口窄到两组要重叠时，从左组尾部开始藏按钮（精确匹配先藏）——
+ * 被藏的开关在「筛选」菜单里始终存在，功能不丢。
+ */
+static void LayoutToolbar(HWND hwnd)
+{
+    HDC hdc;
+    HGDIOBJ oldFont;
+    SIZE size;
+    RECT rc;
+    int i, w, h, pad, gap, btnH, x, right;
+    int textW[TBB_COUNT];
+
+    if (!g_hToolbar) return;
+    GetClientRect(g_hToolbar, &rc);
+    w = rc.right;
+    h = rc.bottom;
+    pad = S(hwnd, 10);
+    gap = S(hwnd, 8);
+    btnH = S(hwnd, 28);
+
+    hdc = GetDC(hwnd);
+    oldFont = SelectObject(hdc, g_tbFont);
+    for (i = 0; i < TBB_COUNT; ++i) {
+        const WCHAR *text = Tr(TbTextId(i));
+        int t = 0;
+        if (GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size)) t = size.cx;
+        /* 提权徽章有前置圆点；下拉按钮：文字 + 三角 */
+        if (i == TBB_ADMIN) t += S(hwnd, 6) + S(hwnd, 5);
+        if (i == TBB_FILTER || i == TBB_LANG) t += S(hwnd, 12);
+        textW[i] = t + S(hwnd, 18);
+    }
+    SelectObject(hdc, oldFont);
+    ReleaseDC(hwnd, hdc);
+
+    /*
+     * 左组五个按钮与右组（提权/筛选/语言）全部常驻：窗口最小宽度（见
+     * WM_GETMINMAXINFO）就是按「两排按钮 + 一行式查询区」的需求定的，
+     * 不做窄窗收纳——筛选开关藏在菜单里等于功能消失，不如把窗口锁宽。
+     */
+    x = pad;
+    for (i = TBB_REFRESH; i <= TBB_PIN; ++i) {
+        g_tbRect[i].left = x;
+        g_tbRect[i].right = x + textW[i];
+        g_tbRect[i].top = (h - btnH) / 2;
+        g_tbRect[i].bottom = g_tbRect[i].top + btnH;
+        x += textW[i] + gap;
+    }
+    right = w - pad;
+    for (i = TBB_COUNT - 1; i >= TBB_ADMIN; --i) {
+        g_tbRect[i].left = right - textW[i];
+        g_tbRect[i].right = right;
+        g_tbRect[i].top = (h - btnH) / 2;
+        g_tbRect[i].bottom = g_tbRect[i].top + btnH;
+        right -= textW[i] + gap;
+    }
+    /* 按钮矩形变了，悬停提示的热区跟着更新 */
+    if (g_hTip) {
+        TOOLINFOW ti;
+        int k;
+
+        for (k = 0; k < TBB_COUNT; ++k) {
+            ZeroMemory(&ti, sizeof(ti));
+            ti.cbSize = sizeof(ti);
+            ti.hwnd = hwnd;
+            ti.uId = (UINT_PTR)k;
+            ti.rect = g_tbRect[k];
+            SendMessageW(g_hTip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+        }
+    }
+    InvalidateRect(g_hToolbar, NULL, TRUE);
+}
+
+static int TbHitTest(HWND hwnd, POINT pt)
+{
+    int i;
+    for (i = TBB_REFRESH; i < TBB_COUNT; ++i) {
+        if (PtInRect(&g_tbRect[i], pt)) return i;
+    }
+    return -1;
+}
+
+static void ToolbarPopup(int btn)
+{
+    HMENU target = NULL;
+    POINT pt;
+
+    if (!g_hToolbar || !g_hMenuBar) return;
+    if (btn == TBB_FILTER) target = GetSubMenu(g_hMenuBar, 0);
+    if (btn == TBB_LANG) target = GetSubMenu(g_hMenuBar, 1);
+    if (!target) return;
+
+    pt.x = g_tbRect[btn].left;
+    pt.y = g_tbRect[btn].bottom + 2;
+    MapWindowPoints(g_hToolbar, NULL, &pt, 1);
+    TrackPopupMenu(target, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                   pt.x, pt.y, 0, g_hwndMain, NULL);
+}
+
+/* 按钮动作全部折算成主窗口的 WM_COMMAND：状态翻转、菜单勾选、列表刷新都走原有分支 */
+static void ToolbarActivate(HWND hwnd, int btn)
+{
+    UINT cmd;
+    switch (btn) {
+    case TBB_REFRESH: cmd = ID_BTN_REFRESH; break;
+    case TBB_AUTO:    cmd = IDM_AUTO; break;
+    case TBB_LISTEN:  cmd = IDM_LISTEN; break;
+    case TBB_HIDESYS: cmd = IDM_HIDESYS; break;
+    case TBB_EXACT:   cmd = IDM_EXACT; break;
+    case TBB_PIN:     cmd = IDM_TOPMOST; break;
+    case TBB_ADMIN:
+        if (!ProcIsElevated()) SendMessageW(g_hwndMain, WM_COMMAND, IDM_ELEVATE, 0);
+        return;
+    case TBB_FILTER:
+    case TBB_LANG:
+        ToolbarPopup(btn);
+        return;
+    default:
+        return;
+    }
+    SendMessageW(g_hwndMain, WM_COMMAND, cmd, 0);
+}
+
+static void DrawToolbarButton(HWND hwnd, HDC hdc, int btn)
+{
+    RECT rc = g_tbRect[btn];
+    int toggled = TbToggled(btn);
+    int hot = (g_tbHover == btn);
+    int pressed = (g_tbPressed == btn && hot);
+    COLORREF fg = RGB(31, 41, 55);
+    const WCHAR *text = Tr(TbTextId(btn));
+    SIZE size;
+    HGDIOBJ oldFont;
+    int oldBk;
+    COLORREF oldText;
+    int textLen = (int)wcslen(text);
+    int x, y;
+
+    /* 底色：切换态 > 按下 > 悬停 */
+    if (btn == TBB_ADMIN) {
+        if (ProcIsElevated()) {
+            FillRoundRect(hwnd, hdc, rc, S(hwnd, 13), RGB(231, 244, 231));
+            fg = RGB(16, 124, 16);
+        } else {
+            FillRoundRect(hwnd, hdc, rc, S(hwnd, 13),
+                          hot ? RGB(226, 231, 239) : RGB(238, 241, 245));
+            fg = RGB(75, 85, 99);
+        }
+    } else if (toggled) {
+        FillRoundRect(hwnd, hdc, rc, S(hwnd, 6), pressed ? RGB(199, 217, 255) : ACCENT_SOFT);
+        fg = ACCENT;
+    } else if (pressed) {
+        FillRoundRect(hwnd, hdc, rc, S(hwnd, 6), RGB(219, 226, 240));
+    } else if (hot) {
+        FillRoundRect(hwnd, hdc, rc, S(hwnd, 6), RGB(233, 238, 246));
+    }
+
+    oldFont = SelectObject(hdc, g_tbFont);
+    GetTextExtentPoint32W(hdc, text, textLen, &size);
+    oldBk = SetBkMode(hdc, TRANSPARENT);
+    oldText = SetTextColor(hdc, fg);
+
+    x = rc.left + S(hwnd, 10);
+    y = (rc.top + rc.bottom - size.cy) / 2;
+    if (btn == TBB_ADMIN) {
+        /* 徽章前置小圆点，与列表里的状态徽章同一语言 */
+        HGDIOBJ oldBrush, oldPen;
+        HBRUSH brush = CreateSolidBrush(fg);
+        oldBrush = SelectObject(hdc, brush);
+        oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        Ellipse(hdc, x, (rc.top + rc.bottom) / 2 - S(hwnd, 3),
+                x + S(hwnd, 6), (rc.top + rc.bottom) / 2 + S(hwnd, 3));
+        SelectObject(hdc, oldBrush);
+        SelectObject(hdc, oldPen);
+        DeleteObject(brush);
+        x += S(hwnd, 6) + S(hwnd, 5);
+    }
+    TextOutW(hdc, x, y, text, textLen);
+    x += size.cx;
+    if (btn == TBB_FILTER || btn == TBB_LANG) {
+        DrawDropDown(hwnd, hdc, x + S(hwnd, 4),
+                     (rc.top + rc.bottom) / 2 - S(hwnd, 2), fg);
+    }
+
+    SetTextColor(hdc, oldText);
+    SetBkMode(hdc, oldBk);
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK ToolbarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        /* 悬停提示：每按钮注册一个 rect 工具，文案绘制时按语言即时取 */
+        TOOLINFOW ti;
+        int i;
+
+        g_hTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+                                 WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                 0, 0, 0, 0, hwnd, NULL, g_hInst, NULL);
+        if (!g_hTip) break;
+        SetWindowPos(g_hTip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        for (i = 0; i < TBB_COUNT; ++i) {
+            ZeroMemory(&ti, sizeof(ti));
+            ti.cbSize = sizeof(ti);
+            ti.hwnd = hwnd;
+            ti.uId = (UINT_PTR)i;
+            ti.uFlags = TTF_SUBCLASS;
+            ti.lpszText = LPSTR_TEXTCALLBACKW;
+            SendMessageW(g_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        }
+        break;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        HBRUSH lineBrush;
+        int i;
+
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        /* 底部 1px 分隔线，把工具条和下面的查询卡片分层 */
+        lineBrush = CreateSolidBrush(CARD_BORDER);
+        rc.top = rc.bottom - 1;
+        FillRect(hdc, &rc, lineBrush);
+        DeleteObject(lineBrush);
+
+        for (i = TBB_REFRESH; i < TBB_COUNT; ++i) {
+            DrawToolbarButton(hwnd, hdc, i);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE: {
+        POINT pt = { TB_PT_X(lp), TB_PT_Y(lp) };
+        int hit = TbHitTest(hwnd, pt);
+        if (hit != g_tbHover) {
+            g_tbHover = hit;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        if (hit >= 0 && !(GetWindowLongPtr(hwnd, GWLP_USERDATA) & 1)) {
+            TRACKMOUSEEVENT tme;
+            ZeroMemory(&tme, sizeof(tme));
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 1);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        g_tbHover = -1;
+        g_tbPressed = -1;
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT pt = { TB_PT_X(lp), TB_PT_Y(lp) };
+        g_tbPressed = TbHitTest(hwnd, pt);
+        SetCapture(hwnd);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        POINT pt = { TB_PT_X(lp), TB_PT_Y(lp) };
+        int hit = TbHitTest(hwnd, pt);
+        if (g_tbPressed >= 0 && hit == g_tbPressed) ToolbarActivate(hwnd, hit);
+        g_tbPressed = -1;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        g_tbPressed = -1;
+        return 0;
+    case WM_SETFONT:
+        /* 自注册类不会自动保存字体，WM_GETFONT 要能取回测量用 */
+        g_tbFont = (HFONT)wp;
+        LayoutToolbar(hwnd);
+        return 0;
+    case WM_GETFONT:
+        return (LRESULT)g_tbFont;
+    case WM_NOTIFY:
+    {
+        NMHDR *hdr = (NMHDR *)lp;
+        if (hdr->code == TTN_GETDISPINFOW && hdr->hwndFrom == g_hTip) {
+            NMTTDISPINFOW *tt = (NMTTDISPINFOW *)lp;
+            tt->lpszText = (LPWSTR)Tr(TbTipId((int)tt->hdr.idFrom));
+            return 0;
+        }
+        break;
+    }
+    case WM_SIZE:
+        LayoutToolbar(hwnd);
+        return 0;
+    case WM_NCDESTROY:
+        g_hToolbar = NULL;
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static BOOL RegisterToolbar(HINSTANCE hInst)
+{
+    WNDCLASSW wc;
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = ToolbarProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = TOOLBAR_CLASS;
+    return RegisterClassW(&wc) != 0;
+}
+
+/* ------------------------------------------------------------ 查询区清除按钮 */
+
+#define CLEARBTN_CLASS L"PortViewClearBtn"
+
+/*
+ * 查询卡片行尾的 ✕ 小按钮：点击等同 Esc 清除全部筛选。
+ * 24px 见方的自绘方块，悬停浅灰圆角，叉号用两条线画，与工具条同一套笔触。
+ */
+static LRESULT CALLBACK ClearBtnProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        int hot = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+        int w, h, cx, cy, r;
+        HPEN pen;
+        HGDIOBJ oldPen, oldBrush;
+
+        GetClientRect(hwnd, &rc);
+        w = rc.right; h = rc.bottom;
+        cx = w / 2; cy = h / 2;
+        r = S(hwnd, 5);
+
+        /* 非悬停也要铺白底：按钮不铺底会残留创建时的未初始化像素 */
+        if (hot) FillRoundRect(hwnd, hdc, rc, S(hwnd, 6), RGB(226, 232, 240));
+        else FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+        pen = CreatePen(PS_SOLID, 1, hot ? RGB(75, 85, 99) : RGB(154, 164, 178));
+
+        pen = CreatePen(PS_SOLID, 1, hot ? RGB(75, 85, 99) : RGB(154, 164, 178));
+        oldPen = SelectObject(hdc, pen);
+        oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        MoveToEx(hdc, cx - r, cy - r, NULL);
+        LineTo(hdc, cx + r, cy + r);
+        MoveToEx(hdc, cx + r, cy - r, NULL);
+        LineTo(hdc, cx - r, cy + r);
+        SelectObject(hdc, oldBrush);
+        SelectObject(hdc, oldPen);
+        DeleteObject(pen);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE:
+        if (!(GetWindowLongPtr(hwnd, GWLP_USERDATA) & 1)) {
+            TRACKMOUSEEVENT tme;
+            ZeroMemory(&tme, sizeof(tme));
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 1);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONUP:
+        SendMessageW(g_hwndMain, WM_COMMAND, IDM_CLEAR, 0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static BOOL RegisterClearBtn(HINSTANCE hInst)
+{
+    WNDCLASSW wc;
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = ClearBtnProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = CLEARBTN_CLASS;
+    return RegisterClassW(&wc) != 0;
+}
+
+/* ------------------------------------------------------------ 基础工具 */
 
 static PORT_ENTRY *g_all = NULL;
 static size_t g_allCount = 0;
@@ -553,22 +1268,12 @@ static BOOL g_haveSuccessTime = FALSE;
 static unsigned g_portsGeneration = 0;
 static BOOL g_portsPending = FALSE;
 static int g_colUserSized[COL_COUNT];
+static int g_colSavedW[COL_COUNT];   /* 上次会话拖出的列宽（逻辑像素），-1=未记录 */
 static volatile LONG g_portsBusy = 0;
 static volatile LONG g_killBusy = 0;
 
-static int g_sortCol = COL_LPORT;
+static int g_sortCol = COL_LADDR;
 static int g_sortAsc = 1;
-
-/* UpdateInfoBar 定义在 ApplyView 之后（它要用 SelectedEntry），这里先前置声明 */
-static void UpdateInfoBar(void);
-
-/* 顶栏的两个结构化筛选，与文本框是「与」的关系：文本框管模糊匹配，这两个管精确范围 */
-static int g_protoFilter = 0;   /* 0=全部 1=仅TCP 2=仅UDP 3=仅IPv4 4=仅IPv6 */
-static int g_listenOnly = 0;    /* 1=只看监听端口 */
-static int g_hideSystem = 0;    /* 1=隐藏系统关键进程占用的端口 */
-static int g_exactMatch = 0;    /* 1=搜索框按完整字段匹配 */
-static BOOL g_autoOn = TRUE;    /* 自动刷新勾选框状态 */
-static BOOL g_hadInitialSelect = FALSE;   /* 首次载入是否已做过默认选中 */
 
 /* ------------------------------------------------------------ 基础工具 */
 
@@ -635,6 +1340,131 @@ static BOOL CALLBACK SetFontProc(HWND hwnd, LPARAM lp)
 {
     SendMessage(hwnd, WM_SETFONT, (WPARAM)lp, TRUE);
     return TRUE;
+}
+
+/*
+ * 窗口位置/尺寸与排序状态的记忆。退出时写入，启动时读回；
+ * 位置记录的是还原态矩形，最大化单独记一个标志。
+ */
+static void SaveUiPrefs(void)
+{
+    WINDOWPLACEMENT wp;
+    HKEY key;
+    DWORD v;
+
+    if (!g_hwndMain) return;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\PortView", 0, NULL, 0, KEY_WRITE,
+                        NULL, &key, NULL) != ERROR_SUCCESS)
+        return;
+
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(g_hwndMain, &wp)) {
+        RegSetValueExW(key, L"WndLeft", 0, REG_DWORD,
+                       (const BYTE *)&wp.rcNormalPosition.left, sizeof(DWORD));
+        RegSetValueExW(key, L"WndTop", 0, REG_DWORD,
+                       (const BYTE *)&wp.rcNormalPosition.top, sizeof(DWORD));
+        RegSetValueExW(key, L"WndRight", 0, REG_DWORD,
+                       (const BYTE *)&wp.rcNormalPosition.right, sizeof(DWORD));
+        RegSetValueExW(key, L"WndBottom", 0, REG_DWORD,
+                       (const BYTE *)&wp.rcNormalPosition.bottom, sizeof(DWORD));
+        v = (wp.showCmd == SW_SHOWMAXIMIZED) ? 1u : 0u;
+        RegSetValueExW(key, L"WndMaximized", 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+    }
+    v = (DWORD)g_sortCol;
+    RegSetValueExW(key, L"SortCol", 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+    v = g_sortAsc ? 1u : 0u;
+    RegSetValueExW(key, L"SortAsc", 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+    v = g_topmost ? 1u : 0u;
+    RegSetValueExW(key, L"Topmost", 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+
+    /*
+     * 列宽只在用户拖过时记录（存逻辑像素，跨 DPI 恢复不失真），
+     * 并写一份列数校验值——将来列结构变化时旧宽整组作废。
+     */
+    {
+        UINT dpi = GetDpiOf(g_hwndMain);
+        WCHAR name[16];
+        int i;
+
+        v = (DWORD)COL_COUNT;
+        RegSetValueExW(key, L"ColCount", 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+        for (i = 0; i < COL_COUNT; ++i) {
+            _snwprintf(name, 16, L"ColW%d", i);
+            v = g_colUserSized[i]
+                    ? (DWORD)MulDiv(ListView_GetColumnWidth(g_hList, i), 96, (int)dpi)
+                    : (DWORD)-1;
+            RegSetValueExW(key, name, 0, REG_DWORD, (const BYTE *)&v, sizeof(DWORD));
+        }
+    }
+    RegCloseKey(key);
+}
+
+/* 启动时读回。返回 TRUE 表示 rc 里有可用的还原矩形；排序直接写全局并夹在合法范围 */
+static BOOL LoadUiPrefs(RECT *rc, BOOL *maximized)
+{
+    HKEY key;
+    DWORD v, cb;
+    RECT r;
+    BOOL haveRect = TRUE;
+
+    *maximized = FALSE;
+    SetRectEmpty(rc);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PortView", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return FALSE;
+
+    cb = sizeof(v);
+    if (RegQueryValueExW(key, L"SortCol", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS &&
+        v < COL_COUNT) {
+        g_sortCol = (int)v;
+    }
+    cb = sizeof(v);
+    if (RegQueryValueExW(key, L"SortAsc", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS) {
+        g_sortAsc = v ? 1 : 0;
+    }
+    cb = sizeof(v);
+    if (RegQueryValueExW(key, L"Topmost", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS) {
+        g_topmost = v ? TRUE : FALSE;
+    }
+
+    /* 列宽带列数校验：列结构对不上时整组作废，全部走默认宽 */
+    {
+        WCHAR name[16];
+        int i;
+        BOOL colsOk;
+
+        cb = sizeof(v);
+        colsOk = RegQueryValueExW(key, L"ColCount", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS &&
+                 v == (DWORD)COL_COUNT;
+        for (i = 0; i < COL_COUNT; ++i) {
+            g_colSavedW[i] = -1;
+            if (colsOk) {
+                _snwprintf(name, 16, L"ColW%d", i);
+                cb = sizeof(v);
+                if (RegQueryValueExW(key, name, NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS &&
+                    v >= 40 && v <= 4000) {
+                    g_colSavedW[i] = (int)v;
+                }
+            }
+        }
+    }
+
+    cb = sizeof(r.left);
+    haveRect &= RegQueryValueExW(key, L"WndLeft", NULL, NULL, (BYTE *)&r.left, &cb) == ERROR_SUCCESS;
+    haveRect &= RegQueryValueExW(key, L"WndTop", NULL, NULL, (BYTE *)&r.top, &cb) == ERROR_SUCCESS;
+    haveRect &= RegQueryValueExW(key, L"WndRight", NULL, NULL, (BYTE *)&r.right, &cb) == ERROR_SUCCESS;
+    haveRect &= RegQueryValueExW(key, L"WndBottom", NULL, NULL, (BYTE *)&r.bottom, &cb) == ERROR_SUCCESS;
+    cb = sizeof(v);
+    if (RegQueryValueExW(key, L"WndMaximized", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS)
+        *maximized = v ? TRUE : FALSE;
+    RegCloseKey(key);
+
+    if (haveRect && r.right > r.left && r.bottom > r.top &&
+        r.right - r.left >= GetSystemMetrics(SM_CXMINTRACK) &&
+        r.bottom - r.top >= GetSystemMetrics(SM_CYMINTRACK)) {
+        *rc = r;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static void CopyText(HWND hwnd, const WCHAR *text)
@@ -757,15 +1587,24 @@ static const WCHAR *EntryStateText(const PORT_ENTRY *e)
     return StateText(e->stateCode);
 }
 
+/* 「地址:端口」一次格式化成显示文本 */
+static const WCHAR *AddrPortText(WCHAR *buf, size_t cch, const WCHAR *addr, DWORD port)
+{
+    _snwprintf(buf, (int)cch, L"%s:%u", ShortAddr(addr), port);
+    buf[cch - 1] = 0;
+    return buf;
+}
+
 /* LVS_OWNERDATA 下按需提供单元格文本，文本在 ports.c 枚举时已格式化好 */
 static const WCHAR *CellText(const PORT_ENTRY *e, int col)
 {
+    static WCHAR lbuf[80], rbuf[80];   /* DISPINFO 取走文本立即拷贝，两块缓冲互不踩 */
+
     switch (col) {
     case COL_PROTO: return e->proto;
-    case COL_LADDR: return ShortAddr(e->localAddr);
-    case COL_LPORT: return e->portText;
-    case COL_RADDR: return ShortAddr(e->remoteAddr);
-    case COL_RPORT: return e->rportText;
+    case COL_LADDR: return AddrPortText(lbuf, 80, e->localAddr, e->localPort);
+    case COL_RADDR: return e->remoteAddr[0] ? AddrPortText(rbuf, 80, e->remoteAddr, e->remotePort)
+                                            : L"—";
     case COL_STATE: return EntryStateText(e);
     case COL_PID:   return e->pidText;
     case COL_NAME:  return e->procName;
@@ -774,20 +1613,24 @@ static const WCHAR *CellText(const PORT_ENTRY *e, int col)
     }
 }
 
-/*
- * 状态文字配色，让连接状态一眼可辨：监听绿、已建立蓝、终态灰、中间态橙。
- * 按内核原值判断，与界面语言无关；空状态（UDP 行）返回 CLR_DEFAULT 走系统默认色。
- */
-static COLORREF StateTextColor(const PORT_ENTRY *e)
+/* 状态徽章配色（前景字 + 浅底）：监听绿、已建立蓝、终态灰、中间态橙。
+ * 按内核原值判断，与界面语言无关；UDP 行没有状态，不画徽章。 */
+typedef struct {
+    COLORREF fg;
+    COLORREF bg;
+} STATE_BADGE_COLORS;
+
+static STATE_BADGE_COLORS StateBadgeColors(const PORT_ENTRY *e)
 {
-    if (!e->stateCode) return CLR_DEFAULT;
+    STATE_BADGE_COLORS c;
     switch (e->stateCode) {
-    case MIB_TCP_STATE_LISTEN:    return RGB(16, 124, 16);
-    case MIB_TCP_STATE_ESTAB:     return RGB(0, 102, 204);
+    case MIB_TCP_STATE_LISTEN:    c.fg = RGB(16, 124, 16);   c.bg = RGB(231, 244, 231); break;
+    case MIB_TCP_STATE_ESTAB:     c.fg = RGB(11, 98, 196);   c.bg = RGB(228, 240, 252); break;
     case MIB_TCP_STATE_TIME_WAIT:
-    case MIB_TCP_STATE_CLOSED:    return RGB(130, 130, 130);
-    default:                      return RGB(200, 110, 0);  /* SYN / FIN / 关闭等待 等中间态 */
+    case MIB_TCP_STATE_CLOSED:    c.fg = RGB(107, 114, 128); c.bg = RGB(238, 241, 245); break;
+    default:                      c.fg = RGB(180, 83, 9);    c.bg = RGB(253, 241, 222); break;
     }
+    return c;
 }
 
 /*
@@ -1001,10 +1844,15 @@ static int CmpEntry(const void *pa, const void *pb)
 
     switch (g_sortCol) {
     case COL_PROTO: r = _wcsicmp(a->proto, b->proto); break;
-    case COL_LADDR: r = CmpAddress(a->localAddr, b->localAddr); break;
-    case COL_LPORT: r = (int)a->localPort - (int)b->localPort; break;
-    case COL_RADDR: r = CmpAddress(a->remoteAddr, b->remoteAddr); break;
-    case COL_RPORT: r = (int)a->remotePort - (int)b->remotePort; break;
+    case COL_LADDR:
+        /* 合并列按地址排，同地址再按端口，与「地址:端口」的阅读顺序一致 */
+        r = CmpAddress(a->localAddr, b->localAddr);
+        if (r == 0) r = (int)a->localPort - (int)b->localPort;
+        break;
+    case COL_RADDR:
+        r = CmpAddress(a->remoteAddr, b->remoteAddr);
+        if (r == 0) r = (int)a->remotePort - (int)b->remotePort;
+        break;
     case COL_STATE: r = _wcsicmp(EntryStateText(a), EntryStateText(b)); break;
     case COL_PID:   r = (int)a->pid - (int)b->pid; break;
     case COL_NAME:  r = _wcsicmp(a->procName, b->procName); break;
@@ -1020,12 +1868,8 @@ static int CmpEntry(const void *pa, const void *pb)
 }
 
 /*
- * 顶部菜单栏。
- *
- * 筛选条件放菜单而不是工具栏，是因为 Win32 的下拉式 ComboBox 拒绝高于字体算出的
- * 自然高度（实测 CBS_DROPDOWNLIST / CBS_DROPDOWN / CBS_NOINTEGRALHEIGHT 全部无效，
- * CB_SETITEMHEIGHT 也不生效），硬留在工具栏里就永远和旁边的按钮差一截。
- * 勾选项做成菜单项天生没有高度问题，勾选标记也比复选框更醒目。
+ * 筛选菜单。不挂到窗口菜单栏上（工具条已接管高频开关），作为「筛选 ▾」按钮的
+ * 下拉内容保留：协议子菜单、清除全部这类低频动作放这里，勾选态照常维护。
  */
 static HMENU BuildMainMenu(void)
 {
@@ -1060,7 +1904,7 @@ static HMENU BuildMainMenu(void)
 /* 把当前筛选状态回写到菜单勾选标记上。所有改状态的地方都要走这里，别各写各的。 */
 static void SyncFilterMenu(void)
 {
-    HMENU bar = GetMenu(g_hwndMain);
+    HMENU bar = g_hMenuBar;
     HMENU filter;
     HMENU proto;
     HMENU lang;
@@ -1085,6 +1929,9 @@ static void SyncFilterMenu(void)
         int cmd = g_english ? IDM_LANG_EN : IDM_LANG_ZH;
         CheckMenuRadioItem(lang, IDM_LANG_EN, IDM_LANG_ZH, cmd, MF_BYCOMMAND);
     }
+
+    /* 工具条按钮的激活态读的就是这几面旗子，状态一变就重画 */
+    if (g_hToolbar) InvalidateRect(g_hToolbar, NULL, TRUE);
 }
 
 static void UpdateStatus(void)
@@ -1134,16 +1981,8 @@ static void UpdateStatus(void)
     if (g_killBusy) wcscpy(text, Tr(TXT_BAR_KILLING));
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)text);
 
-    /*
-     * 右端这一格同时承担两件事：显示当前权限，以及作为提权入口。
-     * 未提权时显示成「标准用户（点击提权）」，鼠标移上去有下划线提示可点；
-     * 已提权则只是纯状态，不可点。
-     */
-    if (ProcIsElevated()) {
-        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)Tr(TXT_BAR_ADMIN));
-    } else {
-        SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)Tr(TXT_BAR_STD_USER));
-    }
+    /* 右端固定放操作提示；权限状态已由工具条的徽章承担，不再在这里重复 */
+    SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)Tr(TXT_BAR_HINT));
 }
 
 /*
@@ -1195,8 +2034,8 @@ static void PaintEmptyHint(HDC hdc)
     if (!ShouldPaintEmptyHint()) return;
 
     GetClientRect(g_hList, &rc);
-    /* 避开列头区域，让提示落在数据区中央 */
-    if (rc.bottom > S(g_hwndMain, 24)) rc.top += S(g_hwndMain, 24);
+    /* 避开列头区域（行高加大后列头也更高），让提示落在数据区中央 */
+    if (rc.bottom > S(g_hwndMain, 30)) rc.top += S(g_hwndMain, 30);
 
     msg = EmptyHintText();
     font = g_hFont ? g_hFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -1254,12 +2093,211 @@ static void UpdateSortMark(void)
     }
 }
 
-/* 交替行底色；选中/拖放高亮行保留系统配色不动 */
-static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
+#define HIGHLIGHT_MS 2500   /* 新出现/刚消失的高亮保留时长 */
+
+/* 线性插值两色，ratio 0..256（256=完全取 b） */
+static COLORREF LerpColor(COLORREF a, COLORREF b, int ratio)
 {
-    if (!(cd->nmcd.uItemState & (CDIS_SELECTED | CDIS_DROPHILITED)) &&
-        (cd->nmcd.dwItemSpec & 1)) {
-        cd->clrTextBk = RGB(236, 244, 255);
+    return RGB(GetRValue(a) + ((GetRValue(b) - GetRValue(a)) * ratio >> 8),
+               GetGValue(a) + ((GetGValue(b) - GetGValue(a)) * ratio >> 8),
+               GetBValue(a) + ((GetBValue(b) - GetBValue(a)) * ratio >> 8));
+}
+
+/*
+ * 行底色：斑马纹为基底，叠加「新出现绿 / 刚消失红」的时间渐退。
+ * 新增连接在 HIGHLIGHT_MS 内从浅绿褪回底色，用于盯「哪个连接刚起来」；
+ * 刚消失的连接保留同长时长红底，用于确认「谁刚断开」。
+ * 选中行不参与（保留系统选中色）。
+ */
+static COLORREF RowBaseBg(const PORT_ENTRY *e, DWORD_PTR row, BOOL selected)
+{
+    COLORREF base = (row & 1) ? RGB(245, 247, 250) : RGB(255, 255, 255);
+    DWORD now = GetTickCount();
+
+    if (!selected) {
+        if (e->dieTick) {
+            DWORD t = now - e->dieTick;
+            if (t < HIGHLIGHT_MS)
+                return LerpColor(base, RGB(252, 226, 222), 200 - (int)(200 * t / HIGHLIGHT_MS));
+        } else if (e->appearTick) {
+            DWORD t = now - e->appearTick;
+            if (t < HIGHLIGHT_MS)
+                return LerpColor(base, RGB(214, 242, 214), 190 - (int)(190 * t / HIGHLIGHT_MS));
+        }
+    }
+    return base;
+}
+
+/*
+ * 交替行底色。选中判断走 ListView_GetItemState 实时查询：双缓冲下通知里的
+ * uItemState 常常恒带 CDIS_SELECTED，靠它判断会让斑马纹整列失效。
+ */
+static void ApplyRowBg(NMLVCUSTOMDRAW *cd)
+{
+    BOOL selected = (ListView_GetItemState(g_hList, (int)cd->nmcd.dwItemSpec,
+                                           LVIS_SELECTED) & LVIS_SELECTED) != 0;
+
+    if (!selected && (size_t)cd->nmcd.dwItemSpec < g_viewCount) {
+        cd->clrTextBk = RowBaseBg(&g_view[cd->nmcd.dwItemSpec],
+                                  cd->nmcd.dwItemSpec, FALSE);
+    }
+}
+
+/*
+ * 状态格整格自绘（SKIPDEFAULT，系统不再碰这格）：先铺行底色，再画徽章——
+ * 浅底圆角块 + 深色字 + 前置圆点。悬停行铺固定的浅蓝灰 hover 底（系统的
+ * hover 色同样取不到，用近似值，徽章形态保持稳定）；只有选中行走系统绘制
+ * （见 WM_NOTIFY）；UDP 行没有连接状态，只铺底色不画徽章。
+ */
+static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e);
+static void DrawStateCell(HDC hdc, RECT rcCell, const PORT_ENTRY *e, DWORD_PTR row)
+{
+    BOOL hot = ListView_GetHotItem(g_hList) == (int)row;
+    COLORREF bg = hot ? RGB(233, 241, 250) : RowBaseBg(e, row, FALSE);
+    HBRUSH brush = CreateSolidBrush(bg);
+
+    FillRect(hdc, &rcCell, brush);
+    DeleteObject(brush);
+    if (e->stateCode) DrawStateBadge(hdc, rcCell, e);
+}
+
+/*
+ * 状态徽章：浅底圆角块 + 深色字 + 前置圆点。
+ */
+static void DrawStateBadge(HDC hdc, RECT rcCell, const PORT_ENTRY *e)
+{
+    STATE_BADGE_COLORS colors;
+    const WCHAR *text;
+    HFONT font, oldFont;
+    HBRUSH brush, oldBrush;
+    HPEN pen, oldPen;
+    SIZE size;
+    RECT rcBadge;
+    COLORREF oldText;
+    int oldBk;
+    int textLen;
+    int badgeH, badgeW, dot;
+    int cy = (rcCell.top + rcCell.bottom) / 2;
+    int x;
+
+    if (!e->stateCode) return;
+
+    colors = StateBadgeColors(e);
+    text = EntryStateText(e);
+    textLen = (int)wcslen(text);
+    if (!textLen) return;
+
+    font = g_hFont ? g_hFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    oldFont = SelectObject(hdc, font);
+    GetTextExtentPoint32W(hdc, text, textLen, &size);
+
+    badgeH = rcCell.bottom - rcCell.top - S(g_hwndMain, 10);
+    if (badgeH > S(g_hwndMain, 20)) badgeH = S(g_hwndMain, 20);
+    dot = S(g_hwndMain, 6);
+    badgeW = dot + S(g_hwndMain, 5) + size.cx + S(g_hwndMain, 18);
+    if (badgeW > rcCell.right - rcCell.left - S(g_hwndMain, 8))
+        badgeW = rcCell.right - rcCell.left - S(g_hwndMain, 8);
+
+    rcBadge.left = rcCell.left + S(g_hwndMain, 6);
+    rcBadge.top = cy - badgeH / 2;
+    rcBadge.right = rcBadge.left + badgeW;
+    rcBadge.bottom = rcBadge.top + badgeH;
+    if (rcBadge.right > rcCell.right - S(g_hwndMain, 2))
+        rcBadge.right = rcCell.right - S(g_hwndMain, 2);
+
+    brush = CreateSolidBrush(colors.bg);
+    pen = CreatePen(PS_NULL, 0, 0);
+    oldBrush = SelectObject(hdc, brush);
+    oldPen = SelectObject(hdc, pen);
+    RoundRect(hdc, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom,
+              badgeH, badgeH);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+
+    x = rcBadge.left + S(g_hwndMain, 9);
+    brush = CreateSolidBrush(colors.fg);
+    oldBrush = SelectObject(hdc, brush);
+    oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Ellipse(hdc, x, cy - dot / 2, x + dot, cy + dot / 2);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(brush);
+
+    oldBk = SetBkMode(hdc, TRANSPARENT);
+    oldText = SetTextColor(hdc, colors.fg);
+    TextOutW(hdc, x + dot + S(g_hwndMain, 5),
+             cy - size.cy / 2, text, textLen);
+    SetTextColor(hdc, oldText);
+    SetBkMode(hdc, oldBk);
+    SelectObject(hdc, oldFont);
+}
+
+/*
+ * 扁平表头：白底、灰字、底部一条分隔线，当前排序列带主色小三角。
+ * 系统的 3D 凸起表头和整体风格脱节，全自绘（SKIPDEFAULT）。
+ */
+static void DrawFlatHeader(NMCUSTOMDRAW *nmc, int sortCol, int sortAsc)
+{
+    HWND hdr = nmc->hdr.hwndFrom;
+    WCHAR text[96];
+    HDITEM hdi;
+    HFONT font, oldFont;
+    HBRUSH brush;
+    RECT rc = nmc->rc, line;
+    int oldBk;
+    COLORREF oldText;
+
+    brush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(nmc->hdc, &rc, brush);
+    line = rc;
+    line.top = line.bottom - 1;
+    brush = CreateSolidBrush(CARD_BORDER);
+    FillRect(nmc->hdc, &line, brush);
+    DeleteObject(brush);
+    rc = nmc->rc;
+
+    hdi.mask = HDI_TEXT;
+    hdi.pszText = text;
+    hdi.cchTextMax = 96;
+    if (Header_GetItem(hdr, (int)nmc->dwItemSpec, &hdi)) {
+        font = g_hFont ? g_hFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        oldFont = SelectObject(nmc->hdc, font);
+        oldBk = SetBkMode(nmc->hdc, TRANSPARENT);
+        oldText = SetTextColor(nmc->hdc, RGB(100, 116, 139));
+        rc.left += S(g_hwndMain, 10);
+        rc.right -= S(g_hwndMain, 4);
+        DrawTextW(nmc->hdc, text, -1, &rc,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SetTextColor(nmc->hdc, oldText);
+        SetBkMode(nmc->hdc, oldBk);
+        SelectObject(nmc->hdc, oldFont);
+    }
+
+    /* 排序三角盖在当前列右端，方向跟升/降序走；sortCol<0 表示无排序（模块列表） */
+    if ((int)nmc->dwItemSpec == sortCol) {
+        POINT pts[3];
+        HGDIOBJ oldBrush2, oldPen;
+        int ax = nmc->rc.right - S(g_hwndMain, 18);
+        int ay = (nmc->rc.top + nmc->rc.bottom) / 2;
+
+        if (sortAsc) {
+            pts[0].x = ax;         pts[0].y = ay + S(g_hwndMain, 2);
+            pts[1].x = ax + S(g_hwndMain, 8); pts[1].y = ay + S(g_hwndMain, 2);
+            pts[2].x = ax + S(g_hwndMain, 4); pts[2].y = ay - S(g_hwndMain, 2);
+        } else {
+            pts[0].x = ax;         pts[0].y = ay - S(g_hwndMain, 2);
+            pts[1].x = ax + S(g_hwndMain, 8); pts[1].y = ay - S(g_hwndMain, 2);
+            pts[2].x = ax + S(g_hwndMain, 4); pts[2].y = ay + S(g_hwndMain, 2);
+        }
+        brush = CreateSolidBrush(ACCENT);
+        oldBrush2 = SelectObject(nmc->hdc, brush);
+        oldPen = SelectObject(nmc->hdc, GetStockObject(NULL_PEN));
+        Polygon(nmc->hdc, pts, 3);
+        SelectObject(nmc->hdc, oldBrush2);
+        SelectObject(nmc->hdc, oldPen);
+        DeleteObject(brush);
     }
 }
 
@@ -1268,6 +2306,26 @@ static void ApplyZebraBand(NMLVCUSTOMDRAW *cd)
  * 行文本由 LVN_GETDISPINFO 按需提供。因此刷新不再 DeleteAllItems + 逐行 InsertItem，
  * 也不会为每行做 8 次 SetItemText。
  */
+/*
+ * 渐退高亮需要比 3 秒刷新更细的重绘粒度：可见行里还有未褪完的高亮时开
+ * 300ms 的重绘节拍，全部褪色后自动停掉，不空转。
+ */
+static void ManageHighlightTimer(void)
+{
+    size_t i;
+    DWORD now = GetTickCount();
+    BOOL any = FALSE;
+
+    for (i = 0; i < g_viewCount && !any; ++i) {
+        if ((g_view[i].appearTick && now - g_view[i].appearTick < HIGHLIGHT_MS) ||
+            (g_view[i].dieTick && now - g_view[i].dieTick < HIGHLIGHT_MS)) {
+            any = TRUE;
+        }
+    }
+    if (any) SetTimer(g_hwndMain, ID_HL_TIMER, 300, NULL);
+    else KillTimer(g_hwndMain, ID_HL_TIMER);
+}
+
 static void ApplyView(BOOL keepViewport)
 {
     WCHAR filter[256], port[32], pid[32], name[128];
@@ -1340,6 +2398,11 @@ static void ApplyView(BOOL keepViewport)
         ListView_SetItemState(g_hList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
     }
 
+    /*
+     * 没有可恢复的选中项时默认选中第一行：首屏、以及筛选把选中行滤掉的
+     * 场景都覆盖，详情栏永远有内容。这里必须独立判断、不能挂进下面的
+     * else-if 链：启动路径恒走 keepViewport 分支，挂在链上永远轮不到。
+     */
     if (keepViewport && g_viewCount) {
         int restore = top;
         if (anchor) {
@@ -1353,20 +2416,22 @@ static void ApplyView(BOOL keepViewport)
     } else if (newSel < 0 && top > 0 && g_viewCount) {
         if ((size_t)top >= g_viewCount) top = (int)g_viewCount - 1;
         ListView_EnsureVisible(g_hList, top, TRUE);
-    } else if (g_viewCount && !haveSel && !g_hadInitialSelect) {
-        /*
-         * 首次载入且没有可恢复的选中项时，默认选中第一行。
-         * 之前首屏一行都没选，底部详情是空的，用户要先点一下才知道选中了什么。
-         */
-        g_hadInitialSelect = TRUE;
+    }
+
+    /*
+     * 终局兜底：走到这里仍无选中（首屏、筛选把选中行滤掉、恢复失败被清除）
+     * 就选中第一行，详情栏永远有内容。判断按控件最终状态，而不是中间变量
+     * haveSel——否则「有旧选中但已被筛掉」的路径会漏掉。
+     */
+    if (g_viewCount && ListView_GetNextItem(g_hList, -1, LVNI_SELECTED) < 0) {
         ListView_SetItemState(g_hList, 0, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
     }
 
     InvalidateRect(g_hList, NULL, FALSE);
-    UpdateInfoBar();
     UpdateStatus();
     UpdateSortMark();
+    ManageHighlightTimer();
 }
 
 typedef struct {
@@ -1423,15 +2488,134 @@ static void RequestPorts(void)
     CloseHandle(thread);
 }
 
+/*
+ * 两轮枚举对比用的端口索引：把记录下标按 localPort 摊进 2 的幂个桶，
+ * 「同一条连接」的匹配只扫同桶，复杂度从 O(n*m) 降到 O(n)——
+ * 几千连接的服务器上没有这个索引，每 3 秒一次的全量比对会卡出感知。
+ */
+typedef struct {
+    size_t nBuckets;
+    size_t *start;   /* nBuckets+1：桶起点（前缀和） */
+    int *items;      /* count：记录下标 */
+} PORT_INDEX;
+
+static void BuildPortIndex(const PORT_ENTRY *table, size_t count, size_t nBuckets, PORT_INDEX *ix)
+{
+    size_t i, b;
+    size_t *cur;
+
+    ix->nBuckets = nBuckets;
+    ix->start = (size_t *)malloc((nBuckets + 1) * sizeof(size_t));
+    ix->items = (int *)malloc((count ? count : 1) * sizeof(int));
+    if (!ix->start || !ix->items) {
+        free(ix->start);
+        free(ix->items);
+        ix->start = NULL;
+        ix->items = NULL;
+        return;
+    }
+    for (b = 0; b <= nBuckets; ++b) ix->start[b] = 0;
+    for (i = 0; i < count; ++i) ix->start[(table[i].localPort & (nBuckets - 1)) + 1]++;
+    for (b = 0; b < nBuckets; ++b) ix->start[b + 1] += ix->start[b];
+
+    cur = (size_t *)malloc(nBuckets * sizeof(size_t));
+    if (!cur) {
+        free(ix->start);
+        free(ix->items);
+        ix->start = NULL;
+        ix->items = NULL;
+        return;
+    }
+    for (b = 0; b < nBuckets; ++b) cur[b] = ix->start[b];
+    for (i = 0; i < count; ++i) {
+        b = table[i].localPort & (nBuckets - 1);
+        ix->items[cur[b]++] = (int)i;
+    }
+    free(cur);
+}
+
+static BOOL PortIndexFind(const PORT_INDEX *ix, const PORT_ENTRY *table,
+                          const PORT_ENTRY *e, size_t *outIdx)
+{
+    size_t b = e->localPort & (ix->nBuckets - 1);
+    size_t k;
+
+    if (!ix->items) return FALSE;
+    for (k = ix->start[b]; k < ix->start[b + 1]; ++k) {
+        size_t i = (size_t)ix->items[k];
+        if (SameEntry(&table[i], e)) {
+            if (outIdx) *outIdx = i;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void FreePortIndex(PORT_INDEX *ix)
+{
+    free(ix->start);
+    free(ix->items);
+    ix->start = NULL;
+    ix->items = NULL;
+}
+
 static void ApplyPortsResult(PORTS_RESULT *result)
 {
     if (!result) return;
     if (result->generation == g_portsGeneration) {
         g_portsLoading = FALSE;
         if (result->ok) {
-            free(g_all);
-            g_all = result->entries;
-            g_allCount = result->count;
+            PORT_ENTRY *old = g_all;
+            size_t oldCount = g_allCount;
+            PORT_ENTRY *nu = result->entries;
+            size_t nuCount = result->count;
+            size_t i, j;
+            DWORD now = GetTickCount();
+
+            /*
+             * 新旧两轮枚举对比：
+             * 仍在的连接继承上次的「出现时刻」，新面孔记为刚出现（绿底渐退）；
+             * 消失的连接保留 HIGHLIGHT_MS（红底渐退）后移出显示，让人确认「谁刚断开」。
+             * 匹配走端口桶索引，连接数大时比对依然是线性的。
+             */
+            {
+                PORT_INDEX oldIx = {0}, nuIx = {0};
+
+                BuildPortIndex(old, oldCount, 1024, &oldIx);
+                for (i = 0; i < nuCount; ++i) {
+                    size_t oi;
+                    if (PortIndexFind(&oldIx, old, &nu[i], &oi)) {
+                        nu[i].appearTick = old[oi].appearTick;
+                        nu[i].dieTick = 0;
+                    } else {
+                        nu[i].appearTick = now;
+                    }
+                }
+                FreePortIndex(&oldIx);
+
+                if (oldCount && nu) {
+                    PORT_ENTRY *grown = (PORT_ENTRY *)realloc(nu, (nuCount + oldCount) * sizeof(PORT_ENTRY));
+                    if (grown) {
+                        size_t kept = nuCount;
+                        nu = grown;
+                        result->entries = grown;
+                        BuildPortIndex(nu, nuCount, 1024, &nuIx);
+                        for (j = 0; j < oldCount; ++j) {
+                            if (old[j].dieTick && now - old[j].dieTick >= HIGHLIGHT_MS) continue;
+                            if (PortIndexFind(&nuIx, nu, &old[j], NULL)) continue;
+                            nu[kept] = old[j];
+                            nu[kept].dieTick = now;   /* 保留显示，红底渐退倒计时重新起算 */
+                            kept++;
+                        }
+                        FreePortIndex(&nuIx);
+                        nuCount = kept;
+                    }
+                }
+            }
+
+            g_all = nu;
+            g_allCount = nuCount;
+            free(old);   /* 旧表已并入（延续行被继承、消失行已拷出），释放 */
             g_tableMask = result->tables;
             g_enumFailed = 0;
             GetLocalTime(&g_lastSuccessTime);
@@ -1463,71 +2647,38 @@ static const PORT_ENTRY *SelectedEntry(void)
     return &g_view[i];
 }
 
-/*
- * 刷新底部详情栏。选中即更新，不用双击就能看到「进程 · PID · 路径」。
- * 路径过长时中间省略，保留开头的盘符和结尾的 exe 名——这两段才是定位用的。
- */
-static void CompactPath(const WCHAR *path, WCHAR *out, size_t cch)
-{
-    size_t n;
-    if (!out || cch == 0) return;
-    out[0] = 0;
-    if (!path) return;
-    n = wcslen(path);
-    if (n < cch) {
-        wcscpy(out, path);
-        return;
-    }
-    if (cch < 8) {
-        wcsncpy(out, path, cch - 1);
-        out[cch - 1] = 0;
-        return;
-    }
-    wcsncpy(out, path, (cch - 4) / 2);
-    wcscat(out, L"...");
-    wcscat(out, path + n - (cch - 4 - (cch - 4) / 2));
-}
-
-static void UpdateInfoBar(void)
-{
-    const PORT_ENTRY *e = SelectedEntry();
-    WCHAR text[512], path[220];
-
-    if (!g_hInfoBar) return;
-
-    if (!e) {
-        SetWindowTextW(g_hInfoBar, Tr(TXT_INFO_NONE));
-        return;
-    }
-
-    if (e->procPath[0]) {
-        CompactPath(e->procPath, path, 96);
-        _snwprintf(text, 512, Tr(TXT_INFO_LINE),
-                   e->procName[0] ? e->procName : Tr(TXT_INFO_UNKNOWN_PROC),
-                   e->pid,
-                   path);
-    } else {
-        /* 无路径多是权限不足，明确说出来，免得以为程序没取到 */
-        _snwprintf(text, 512, Tr(TXT_INFO_NOPATH),
-                   e->procName[0] ? e->procName : Tr(TXT_INFO_UNKNOWN_PROC), e->pid);
-    }
-    text[511] = 0;
-
-    SetWindowTextW(g_hInfoBar, text);
-}
-
 /* ------------------------------------------------------------ 操作 */
 
 /*
- * 提权确认：状态栏右端点击、或后续快捷键都走这里，统一提示文案与失败处理。
+ * 提权确认：工具条徽章、状态栏或快捷键都走这里，统一提示文案与失败处理。
  * 提权成功后关闭当前实例，避免出现两个窗口同时枚举端口。
+ * 当前筛选条件随命令行带给新实例，重启后看到的还是同一个视图。
  */
 static BOOL ConfirmElevate(HWND hwnd)
 {
+    WCHAR params[1024], key[512], port[32], pid[32], name[256];
+    WCHAR qKey[1044], qPort[72], qPid[72], qName[532];
+
     if (MessageBoxW(hwnd, Tr(TXT_MB_ELEVATE_BODY), Tr(TXT_MB_ELEVATE_TITLE),
                     MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return FALSE;
     }
+
+    ReadQuery(g_hEdit, key, 512);
+    ReadQuery(g_hEditPort, port, 32);
+    ReadQuery(g_hEditPid, pid, 32);
+    ReadQuery(g_hEditName, name, 256);
+    QuoteArg(qKey, 1044, key);
+    QuoteArg(qPort, 72, port);
+    QuoteArg(qPid, 72, pid);
+    QuoteArg(qName, 532, name);
+    _snwprintf(params, 1024,
+               L"--key %s --port %s --pid %s --name %s"
+               L" --proto %d --listen %d --hidesys %d --exact %d --auto %d",
+               qKey, qPort, qPid, qName,
+               g_protoFilter, g_listenOnly ? 1 : 0, g_hideSystem ? 1 : 0,
+               g_exactMatch ? 1 : 0, g_autoOn ? 1 : 0);
+    params[1023] = 0;
 
     if (ProcElevate(hwnd, params)) {
         PostMessage(g_hwndMain, WM_CLOSE, 0, 0);
@@ -1684,6 +2835,85 @@ static void DoKill(HWND hwnd, const PORT_ENTRY *e, BOOL tree)
     StartKill(hwnd, &target, tree);
 }
 
+/* CSV 单元格写入：含逗号/引号/换行的值包引号并把内部引号翻倍 */
+static void CsvWriteField(FILE *f, const WCHAR *text)
+{
+    BOOL quote = wcschr(text, L',') || wcschr(text, L'"') || wcschr(text, L'\n');
+    const WCHAR *p;
+
+    if (!quote) {
+        fprintf(f, "%ls", text);
+        return;
+    }
+    fprintf(f, "\"");
+    for (p = text; *p; ++p) {
+        if (*p == L'"') fprintf(f, "\"\"");
+        else fprintf(f, "%lc", *p);
+    }
+    fprintf(f, "\"");
+}
+
+/* 当前筛选后的视图导出为 CSV（UTF-8 BOM，Excel 直接打开不乱码） */
+static void ExportCsv(HWND hwnd)
+{
+    static WCHAR filter[160];
+    WCHAR file[MAX_PATH] = L"ports.csv";
+    OPENFILENAMEW ofn;
+    FILE *f;
+    size_t i;
+    int col;
+    WCHAR *p;
+
+    p = filter;
+    wcscpy(p, Tr(TXT_CSV_FILTER));
+    p += wcslen(p) + 1;
+    wcscpy(p, L"*.csv");
+    p += wcslen(p) + 1;
+    wcscpy(p, Tr(TXT_CSV_FILTER_ALL));
+    p += wcslen(p) + 1;
+    wcscpy(p, L"*.*");
+    p += wcslen(p) + 1;
+    *p = 0;
+
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = Tr(TXT_CSV_TITLE);
+    ofn.lpstrDefExt = L"csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetSaveFileNameW(&ofn)) return;
+
+    f = _wfopen(file, L"wb");
+    if (!f) {
+        MessageBoxW(hwnd, Tr(TXT_MB_EXPORT_FAIL), Tr(TXT_MB_HINT), MB_OK | MB_ICONERROR);
+        return;
+    }
+    fwrite("\xEF\xBB\xBF", 1, 3, f);
+    for (col = 0; col < COL_COUNT; ++col) {
+        if (col) fprintf(f, ",");
+        CsvWriteField(f, Tr(COL_TEXT[col]));
+    }
+    fprintf(f, "\n");
+    for (i = 0; i < g_viewCount; ++i) {
+        for (col = 0; col < COL_COUNT; ++col) {
+            if (col) fprintf(f, ",");
+            CsvWriteField(f, CellText(&g_view[i], col));
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+
+    {
+        WCHAR msg[600];
+        _snwprintf(msg, 600, Tr(TXT_MB_EXPORTED), (unsigned)g_viewCount, file);
+        msg[599] = 0;
+        MessageBoxW(hwnd, msg, Tr(TXT_CSV_TITLE), MB_OK | MB_ICONINFORMATION);
+    }
+}
+
 static void ShowContextMenu(HWND hwnd, int item, int x, int y)
 {
     HMENU menu;
@@ -1713,6 +2943,8 @@ static void ShowContextMenu(HWND hwnd, int item, int x, int y)
         AppendMenuW(menu, MF_STRING, IDM_COPY_PATH, Tr(TXT_CTX_COPY_PATH));
         AppendMenuW(menu, MF_STRING, IDM_COPY_PID, Tr(TXT_CTX_COPY_PID));
         AppendMenuW(menu, MF_STRING, IDM_COPY_ROW, Tr(TXT_CTX_COPY_ROW));
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, IDM_EXPORT, Tr(TXT_CTX_EXPORT));
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, IDM_FILTER_SEL, Tr(TXT_CTX_FILTER_SEL));
     }
@@ -2004,29 +3236,43 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_LOC),
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_LOC, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
+        SetWindowSubclass(h, DetailBtnProc, D_BTN_LOC, 0);
 
         h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_KILL),
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_KILL, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
+        SetWindowSubclass(h, DetailBtnProc, D_BTN_KILL, 0);
 
         h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_RELOAD),
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_RELOAD, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
+        SetWindowSubclass(h, DetailBtnProc, D_BTN_RELOAD, 0);
 
         h = CreateWindowExW(0, L"Button", Tr(TXT_D_BTN_CLOSE),
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)D_BTN_CLOSE, g_hInst, NULL);
         SetCtlFont(h, ctx->hFont);
+        SetWindowSubclass(h, DetailBtnProc, D_BTN_CLOSE, 0);
 
         SendMessage(hwnd, WM_SIZE, 0, 0);
         RequestDetail(hwnd, ctx);
         return 0;
     }
+
+    case WM_CTLCOLORSTATIC:
+        /*
+         * 详情窗的 Static（标题、标签、进程图标）必须跟窗口同底白色。
+         * 不处理的话走 DefWindowProc，控件拿到系统默认的 BTNFACE 浅灰底，
+         * 白底窗口上就是标题名称前面挂着一块灰方块。
+         */
+        SetTextColor((HDC)wp, RGB(31, 41, 55));
+        SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
 
     case WM_GETMINMAXINFO:
     {
@@ -2123,7 +3369,27 @@ static LRESULT CALLBACK DetailProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
 
+    case WM_DRAWITEM:
+        if (wp == D_BTN_LOC || wp == D_BTN_KILL || wp == D_BTN_RELOAD || wp == D_BTN_CLOSE) {
+            DrawDetailButton((DRAWITEMSTRUCT *)lp, ctx ? ctx->hFont : NULL);
+            return TRUE;
+        }
+        break;
+
     case WM_NOTIFY:
+        if (LOWORD(wp) == D_LIST_MOD) {
+            NMHDR *nh = (NMHDR *)lp;
+            if (nh->code == NM_CUSTOMDRAW &&
+                nh->hwndFrom == ListView_GetHeader(GetDlgItem(hwnd, D_LIST_MOD))) {
+                NMCUSTOMDRAW *nmc = (NMCUSTOMDRAW *)lp;
+                if (nmc->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+                if (nmc->dwDrawStage == CDDS_ITEMPREPAINT) {
+                    DrawFlatHeader(nmc, -1, 0);   /* 模块列表不排序，只借扁平样式 */
+                    return CDRF_SKIPDEFAULT;
+                }
+                return CDRF_DODEFAULT;
+            }
+        }
         if (LOWORD(wp) == D_LIST_MOD && ((NMHDR *)lp)->code == NM_DBLCLK) {
             int item = ListView_GetNextItem(GetDlgItem(hwnd, D_LIST_MOD), -1, LVNI_SELECTED);
             if (item >= 0) {
@@ -2236,25 +3502,26 @@ static int LabelWidth(HWND label, int fallback)
 }
 
 /*
- * 列表行高。报告视图默认只按字体高度排行，字贴着上边线显得很挤；
- * 挂一个 1px 宽、按目标行高撑开的全透明小图列表，行高交给它，
- * 宽度只占 1px，列文字前面不会多出放图标的位置。
+ * 进程图标列表。报告视图的行高跟随 LVSIL_SMALL 图标高度，这里用 20x26（96dpi 基准）
+ * 的图标格同时解决两件事：行高比默认高出一截，文字不再贴着上缘；每个进程前
+ * 挂上从 exe 提取的真实图标，扫视效率远高于逐行读名字。
+ * index 0 是一张全透明占位图：路径拿不到的行显示它，不会错挂默认图标。
  */
-static void ApplyRowHeight(HWND hwnd)
+static void ApplyListIcons(HWND hwnd)
 {
     HIMAGELIST list;
     HBITMAP bmp, oldBmp;
     HDC hdc, mem;
-    int h = S(hwnd, 24);
+    int cx = S(hwnd, 20), cy = S(hwnd, 26);
 
     hdc = GetDC(hwnd);
     if (!hdc) return;
-    list = ImageList_Create(1, h, ILC_COLOR32 | ILC_MASK, 1, 1);
-    bmp = CreateCompatibleBitmap(hdc, 1, h);
+    list = ImageList_Create(cx, cy, ILC_COLOR32 | ILC_MASK, 64, 32);
+    bmp = CreateCompatibleBitmap(hdc, cx, cy);
     if (list && bmp) {
         mem = CreateCompatibleDC(hdc);
         oldBmp = (HBITMAP)SelectObject(mem, bmp);
-        PatBlt(mem, 0, 0, 1, h, BLACKNESS);   /* 全黑配全黑掩码 = 完全透明 */
+        PatBlt(mem, 0, 0, cx, cy, BLACKNESS);   /* 全黑配全黑掩码 = 完全透明 */
         SelectObject(mem, oldBmp);
         DeleteDC(mem);
         ImageList_AddMasked(list, bmp, RGB(0, 0, 0));
@@ -2263,15 +3530,51 @@ static void ApplyRowHeight(HWND hwnd)
     ReleaseDC(hwnd, hdc);
     if (!list) return;
 
-    if (g_hRowSpacer) ImageList_Destroy(g_hRowSpacer);
-    g_hRowSpacer = list;
+    if (g_hIcons) ImageList_Destroy(g_hIcons);
+    g_hIcons = list;
+    g_iconCacheCount = 0;   /* ImageList 重建后索引全部作废，缓存清空 */
     ListView_SetImageList(g_hList, list, LVSIL_SMALL);
 }
 
-/* 查询区总高度：顶距 + 关键字行 + 行距 + 精确字段行 + 底距。底色和列表上沿都取这个值 */
+static HICON LoadProcessIcon(const PORT_ENTRY *entry);
+
+/* 按路径（无路径时按进程名）取图标在 ImageList 里的索引，未命中才真正提取 */
+static int IconIndexFor(const PORT_ENTRY *e)
+{
+    const WCHAR *key;
+    int i, index;
+    HICON icon;
+
+    if (!g_hIcons) return 0;
+    key = e->procPath[0] ? e->procPath : e->procName;
+    if (!key[0]) return 0;
+
+    for (i = 0; i < g_iconCacheCount; ++i) {
+        if (_wcsicmp(g_iconCache[i].key, key) == 0) return g_iconCache[i].index;
+    }
+
+    icon = LoadProcessIcon(e);
+    if (!icon) return 0;
+    index = ImageList_AddIcon(g_hIcons, icon);
+    DestroyIcon(icon);   /* ImageList_AddIcon 已复制，句柄立即释放 */
+    if (index < 0) return 0;
+
+    if (g_iconCacheCount < ICON_CACHE_MAX) {
+        _snwprintf(g_iconCache[g_iconCacheCount].key, MAX_PATH, L"%s", key);
+        g_iconCache[g_iconCacheCount].key[MAX_PATH - 1] = 0;
+        g_iconCache[g_iconCacheCount].index = index;
+        g_iconCacheCount++;
+    }
+    return index;
+}
+
+/*
+ * 顶栏总高：工具条 + 一行式查询卡片（含上下留白）。
+ * 窗口最小宽度保证四个条件恒排一行，列表上沿与背景分层都取这个值。
+ */
 static int QueryBandHeight(HWND hwnd)
 {
-    return S(hwnd, 6 + 28 + 8 + 28 + 6);
+    return S(hwnd, TOOLBAR_H + 6 + 4 + 28 + 4 + 6);
 }
 
 static void LayoutMain(HWND hwnd)
@@ -2287,7 +3590,10 @@ static void LayoutMain(HWND hwnd)
     h = rc.bottom;
     pad = S(hwnd, 8);
     bh = S(hwnd, 28);
-    toolbarY = S(hwnd, 6);
+    /* 查询行从工具条下面开始：工具条高 + 卡片外留白 + 卡片内边距 */
+    toolbarY = S(hwnd, TOOLBAR_H + 6 + 4);
+
+    if (g_hToolbar) MoveWindow(g_hToolbar, 0, 0, w, S(hwnd, TOOLBAR_H), TRUE);
 
     /*
      * 状态栏高度必须在「状态栏自己的坐标系」里量，不能用 GetWindowRect：
@@ -2310,37 +3616,42 @@ static void LayoutMain(HWND hwnd)
     if (sbH <= 0) sbH = S(hwnd, 22);   /* 量不到时给个合理兜底，不要让布局崩掉 */
 
     /*
-     * 查询区两行：第一行只有关键字，独占整行；第二行放三个精确字段，
-     * 末尾按窗口右边缘对齐刷新。刷新挪到这里是因为跟在关键字后面会被当成
-     * 「搜索按钮」，而它其实是全局动作，和填了什么条件无关。
+     * 查询条件一行式：关键字与进程名弹性分剩余宽度，关键字封顶防止
+     * 无限拉长。四个标签同宽右对齐，输入框左缘落在同一条竖线上。
+     * 窗口最小宽度保证这行排得下，不做换行降级。
      */
     {
         int gap = S(hwnd, 10);
         int labelGap = S(hwnd, 6);
-        int rowGap = S(hwnd, 8);
-        int wRefresh = S(hwnd, 86);
+        int keyCap = S(hwnd, 420);
         int wLabel = LabelWidth(g_hLblKey, S(hwnd, 48));
         int t = LabelWidth(g_hLblPort, S(hwnd, 34));
         int wPort = S(hwnd, 88);      /* 端口号最长 5 位 */
         int wPid = S(hwnd, 96);       /* PID 常见 7~8 位 */
-        int wName, room;
         int x = pad;
         int y = toolbarY;
         int listTop, listH;
+        int keyW, nameW, flex;
 
-        /* 四个标签取同一个宽度并右对齐，两行的输入框左边缘才落在同一条竖线上 */
+        /* 四个标签取同一个宽度并右对齐 */
         if (t > wLabel) wLabel = t;
         t = LabelWidth(g_hLblPid, S(hwnd, 30));
         if (t > wLabel) wLabel = t;
         t = LabelWidth(g_hLblName, S(hwnd, 48));
         if (t > wLabel) wLabel = t;
 
+        flex = w - pad * 2 - ((wLabel + labelGap) * 4 + wPort + wPid + gap * 4
+                              + S(hwnd, 24) + S(hwnd, 12));   /* 尾部给 ✕ 清除按钮留位 */
+        if (flex < S(hwnd, 240)) flex = S(hwnd, 240);   /* 最小宽度之上不该发生，兜底 */
+        keyW = keyCap;
+        if (keyW > flex - S(hwnd, 120)) keyW = flex - S(hwnd, 120);
+        if (keyW < S(hwnd, 120)) keyW = S(hwnd, 120);
+        nameW = flex - keyW;
+
         MoveWindow(g_hLblKey, x, y, wLabel, bh, TRUE);
         x += wLabel + labelGap;
-        MoveWindow(g_hEdit, x, y, w - pad - x, bh, TRUE);
-
-        y += bh + rowGap;
-        x = pad;
+        MoveWindow(g_hEdit, x, y, keyW, bh, TRUE);
+        x += keyW + gap;
         MoveWindow(g_hLblPort, x, y, wLabel, bh, TRUE);
         x += wLabel + labelGap;
         MoveWindow(g_hEditPort, x, y, wPort, bh, TRUE);
@@ -2351,23 +3662,19 @@ static void LayoutMain(HWND hwnd)
         x += wPid + gap;
         MoveWindow(g_hLblName, x, y, wLabel, bh, TRUE);
         x += wLabel + labelGap;
-        /* 进程名跟着剩余空间收放，窗口拉到最窄也不会压到刷新按钮上 */
-        wName = S(hwnd, 200);
-        room = w - pad - wRefresh - gap - x;
-        if (wName > room) wName = room;
-        if (wName < S(hwnd, 90)) wName = S(hwnd, 90);
-        MoveWindow(g_hEditName, x, y, wName, bh, TRUE);
-        MoveWindow(g_hBtnRefresh, w - pad - wRefresh, y, wRefresh, bh, TRUE);
+        MoveWindow(g_hEditName, x, y, nameW, bh, TRUE);
+        x += nameW + gap;
+        MoveWindow(g_hBtnClear, x, y + (bh - S(hwnd, 24)) / 2, S(hwnd, 24), S(hwnd, 24), TRUE);
 
         listTop = QueryBandHeight(hwnd);
         listH = h - sbH - listTop;
         if (listH < S(hwnd, 80)) listH = S(hwnd, 80);
         MoveWindow(g_hList, 0, listTop, w, listH, TRUE);
-        if (g_hInfoBar) ShowWindow(g_hInfoBar, SW_HIDE);
     }
     LayoutColumns(hwnd);
 
-    parts[0] = w - S(hwnd, 220);
+    /* 右格放操作提示，英文比中文长，宽按英文余量给，窄窗时左格保底 120 */
+    parts[0] = w - S(hwnd, 330);
     if (parts[0] < 120) parts[0] = 120;
     parts[1] = -1;
     SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
@@ -2389,7 +3696,6 @@ static void ApplyStaticTexts(void)
     SetWindowTextW(g_hLblPid, Tr(TXT_PID));
     SetWindowTextW(g_hLblName, Tr(TXT_PROCESS));
     SetWindowTextW(g_hLblKey, Tr(TXT_KEYWORD));
-    SetWindowTextW(g_hBtnRefresh, Tr(TXT_REFRESH));
 
     SendMessageW(g_hEditPort, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_PORT));
     SendMessageW(g_hEditPid, EM_SETCUEBANNER, TRUE, (LPARAM)Tr(TXT_CUE_PID));
@@ -2410,23 +3716,23 @@ static void ApplyStaticTexts(void)
  */
 static void ApplyLanguage(int english)
 {
-    HMENU bar, old;
+    HMENU old;
 
     if (g_english == english) return;
     g_english = english;
     SaveLanguagePreference();
     if (!g_hwndMain) return;
 
-    bar = BuildMainMenu();
-    if (bar) {
-        old = GetMenu(g_hwndMain);
-        SetMenu(g_hwndMain, bar);       /* SetMenu 换掉旧菜单但不销毁，得自己释放 */
-        DrawMenuBar(g_hwndMain);
-        if (old) DestroyMenu(old);
-    }
+    old = g_hMenuBar;
+    g_hMenuBar = BuildMainMenu();   /* 菜单不挂窗口，全局句柄直接换，旧的自己释放 */
+    if (old) DestroyMenu(old);
 
     ApplyStaticTexts();
     SyncFilterMenu();
+    if (g_hToolbar) {
+        LayoutToolbar(g_hToolbar);   /* 按钮文字宽度随语言变化，要重新量 */
+        InvalidateRect(g_hToolbar, NULL, TRUE);
+    }
     LayoutMain(g_hwndMain);
     ApplyView(TRUE);   /* 只换文字，不动筛选：滚动位置没必要跟着跳 */
 }
@@ -2441,14 +3747,19 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndMain = hwnd;
         g_hFont = CreateUIFont(GetDpiOf(hwnd));
-        if (!g_hQueryBrush) g_hQueryBrush = CreateSolidBrush(QUERY_BAND_RGB);
-        if (!g_hQueryLineBrush) g_hQueryLineBrush = CreateSolidBrush(QUERY_LINE_RGB);
 
         /*
          * 文字统一由 ApplyStaticTexts 按当前语言写入，这里只建控件。
          * 标签靠右对齐并且四个共用一个宽度（见 LayoutMain），
          * 这样两行的输入框左边缘在同一条竖线上。
          */
+        /* 工具条横贯顶部，先建它在最上层占住位置 */
+        g_hToolbar = CreateWindowExW(0, TOOLBAR_CLASS, L"",
+                                     WS_CHILD | WS_VISIBLE,
+                                     0, 0, 10, 10, hwnd,
+                                     (HMENU)(INT_PTR)ID_TOOLBAR, g_hInst, NULL);
+        SendMessageW(g_hToolbar, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
         g_hLblPort = CreateWindowExW(0, L"Static", L"",
                                      WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT,
                                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_LBL_PORT, g_hInst, NULL);
@@ -2492,10 +3803,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                       g_hInst, NULL);
         InitQueryEdit(g_hEditName, 3);
 
-        g_hBtnRefresh = CreateWindowExW(0, L"Button", L"",
-                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                        0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_BTN_REFRESH,
-                                        g_hInst, NULL);
+        g_hBtnClear = CreateWindowExW(0, CLEARBTN_CLASS, L"",
+                                      WS_CHILD | WS_VISIBLE,
+                                      0, 0, 10, 10, hwnd,
+                                      (HMENU)(INT_PTR)ID_BTN_CLEAR, g_hInst, NULL);
 
         /* LVS_OWNERDATA：虚拟列表，行文本按需提供，刷新时不必逐行重建 */
         g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -2508,10 +3819,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* 竖向网格线去掉：斑马纹已经够分行，再加竖线就成了一张表格里塞满表格线 */
         ListView_SetExtendedListViewStyle(g_hList,
                                           LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
-                                          LVS_EX_LABELTIP);
-        ListView_SetBkColor(g_hList, RGB(250, 252, 255));
-        ListView_SetTextBkColor(g_hList, RGB(250, 252, 255));
-        ApplyRowHeight(hwnd);
+                                          LVS_EX_LABELTIP | LVS_EX_INFOTIP);
+        ListView_SetBkColor(g_hList, RGB(255, 255, 255));
+        ListView_SetTextBkColor(g_hList, RGB(255, 255, 255));
+        ApplyListIcons(hwnd);
         SetWindowSubclass(g_hList, ListSubclassProc, 1, 0);
 
         ZeroMemory(&col, sizeof(col));
@@ -2521,16 +3832,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             col.cx = S(hwnd, COL_WIDTHS[i]);
             ListView_InsertColumn(g_hList, i, &col);
         }
-
-        /*
-         * 底部详情栏：选中行就能看到「进程 · PID · 路径」，不必双击开窗口。
-         * 这个工具的主场景是「谁占了这个端口」，答案就在这一行里，
-         * 藏在双击后面等于多绕一次。
-         */
-        g_hInfoBar = CreateWindowExW(WS_EX_CLIENTEDGE, L"Static", L"",
-                                     WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
-                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_INFOBAR,
-                                     g_hInst, NULL);
+        /* 上次会话拖过的列宽在这里接回：逻辑像素按当前 DPI 还原为物理值 */
+        for (i = 0; i < COL_COUNT; ++i) {
+            if (g_colSavedW[i] > 0) {
+                ListView_SetColumnWidth(g_hList, i, S(hwnd, g_colSavedW[i]));
+                g_colUserSized[i] = 1;   /* 视为用户定宽,后续 LayoutColumns 不再覆盖 */
+            }
+        }
 
         g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
                                     WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -2542,6 +3850,23 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* 默认开启自动刷新，保持端口/进程实时可见 */
         g_autoOn = TRUE;
         SetTimer(hwnd, ID_TIMER, REFRESH_MS, NULL);
+
+        /*
+         * 命令行带入的初始筛选（提权重启 / 快捷方式 --port 等）：
+         * 文本写进输入框走正常的防抖筛选，开关直接翻旗子。
+         */
+        if (g_argKey[0]) SetWindowTextW(g_hEdit, g_argKey);
+        if (g_argPort[0]) SetWindowTextW(g_hEditPort, g_argPort);
+        if (g_argPid[0]) SetWindowTextW(g_hEditPid, g_argPid);
+        if (g_argName[0]) SetWindowTextW(g_hEditName, g_argName);
+        if (g_argProto >= 0 && g_argProto <= 4) g_protoFilter = g_argProto;
+        if (g_argListen >= 0) g_listenOnly = g_argListen ? 1 : 0;
+        if (g_argHidesys >= 0) g_hideSystem = g_argHidesys ? 1 : 0;
+        if (g_argExact >= 0) g_exactMatch = g_argExact ? 1 : 0;
+        if (g_argAuto >= 0) {
+            g_autoOn = g_argAuto ? TRUE : FALSE;
+            if (!g_autoOn) KillTimer(hwnd, ID_TIMER);
+        }
 
         ApplyStaticTexts();
         LayoutMain(hwnd);
@@ -2559,9 +3884,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == g_hLblPort || (HWND)lp == g_hLblPid ||
             (HWND)lp == g_hLblName || (HWND)lp == g_hLblKey) {
-            SetTextColor((HDC)wp, RGB(47, 84, 150));
-            SetBkColor((HDC)wp, QUERY_BAND_RGB);
-            return (LRESULT)g_hQueryBrush;
+            /* 标签改灰：输入框的描边与内容才是主角，标签不需要抢视觉 */
+            SetTextColor((HDC)wp, LABEL_TEXT_RGB);
+            SetBkColor((HDC)wp, RGB(255, 255, 255));
+            return (LRESULT)GetStockObject(WHITE_BRUSH);
         }
         SetTextColor((HDC)wp, RGB(31, 41, 55));
         SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
@@ -2574,21 +3900,34 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_ERASEBKGND:
     {
-        RECT rc;
-        int band = QueryBandHeight(hwnd);   /* 与 LayoutMain 的 listTop 同一个值 */
-        int clientH;
+        RECT rc, card;
+        int band = QueryBandHeight(hwnd);
+        HDC hdc = (HDC)wp;
+        HPEN pen;
+        HGDIOBJ oldPen, oldBrush;
 
         GetClientRect(hwnd, &rc);
-        clientH = rc.bottom;
-        rc.bottom = band;
-        FillRect((HDC)wp, &rc, g_hQueryBrush);
-        /* 查询区底色和列表底色太接近，压一条分隔线把两块分层 */
-        rc.top = band - 1;
-        rc.bottom = band;
-        FillRect((HDC)wp, &rc, g_hQueryLineBrush);
-        rc.top = band;
-        rc.bottom = clientH;
-        FillRect((HDC)wp, &rc, GetSysColorBrush(COLOR_WINDOW));
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+        /*
+         * 查询区画成一张圆角卡片：白底 + 1px 浅灰描边，与工具条、列表分层。
+         * 旧版三段式底色（菜单灰/查询蓝/列表蓝白）就是「色阶接近但不成体系」，
+         * 改成整窗白底后分层交给描边，不再靠三档近似色硬撑。
+         */
+        card.left = S(hwnd, 8);
+        card.right = rc.right - S(hwnd, 8);
+        card.top = S(hwnd, TOOLBAR_H + 6);
+        card.bottom = band - S(hwnd, 6);
+        if (card.right > card.left && card.bottom > card.top) {
+            pen = CreatePen(PS_SOLID, 1, CARD_BORDER);
+            oldPen = SelectObject(hdc, pen);
+            oldBrush = SelectObject(hdc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+            RoundRect(hdc, card.left, card.top, card.right, card.bottom,
+                      S(hwnd, 12), S(hwnd, 12));
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
         return 1;
     }
 
@@ -2598,7 +3937,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_hFont) DeleteObject(g_hFont);
         g_hFont = CreateUIFont(HIWORD(wp));
         EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_hFont);
-        ApplyRowHeight(hwnd);
+        ApplyListIcons(hwnd);   /* 图标格随 DPI 重建，行高跟着走 */
         SetWindowPos(hwnd, NULL, suggested->left, suggested->top,
                      suggested->right - suggested->left, suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2608,8 +3947,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_GETMINMAXINFO:
     {
+        /*
+         * 最小宽度按「工具条两排按钮全显（含置顶图钉）+ 查询条件一行 +
+         * 清除按钮」的实际需求定（英文按钮最宽），宁可让窗口窄不下去，
+         * 也不让按钮/字段被挤没。
+         */
         MINMAXINFO *mmi = (MINMAXINFO *)lp;
-        mmi->ptMinTrackSize.x = S(hwnd, 640);
+        mmi->ptMinTrackSize.x = S(hwnd, 1060);
         mmi->ptMinTrackSize.y = S(hwnd, 380);
         return 0;
     }
@@ -2735,6 +4079,17 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!ProcIsElevated()) ConfirmElevate(hwnd);
             return 0;
 
+        case IDM_TOPMOST:
+            g_topmost = !g_topmost;
+            SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                         0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SyncFilterMenu();   /* 工具条图钉的激活态随这面旗子走 */
+            return 0;
+
+        case IDM_EXPORT:
+            ExportCsv(hwnd);
+            return 0;
+
         case IDM_COPY_PATH:
         {
             const PORT_ENTRY *e = SelectedEntry();
@@ -2798,20 +4153,46 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (hdr->code == NM_CUSTOMDRAW) {
                 NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lp;
 
-                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                    return CDRF_NOTIFYSUBITEMDRAW;
 
                 if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                    ApplyZebraBand(cd);
-                    return CDRF_NOTIFYITEMDRAW;   /* 继续申请 subitem 通知，给状态列上色 */
+                    ApplyRowBg(cd);
+                    return CDRF_NOTIFYSUBITEMDRAW;   /* 逐子项通知：占位符弱化 + 状态徽章 */
                 }
 
                 if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-                    ApplyZebraBand(cd);
-                    /* 非状态列必须显式恢复默认色：CDRF_NEWFONT 的颜色会串到后面的子项 */
-                    cd->clrText = CLR_DEFAULT;
                     if (cd->iSubItem == COL_STATE &&
                         (size_t)cd->nmcd.dwItemSpec < g_viewCount) {
-                        cd->clrText = StateTextColor(&g_view[cd->nmcd.dwItemSpec]);
+                        int row = (int)cd->nmcd.dwItemSpec;
+                        BOOL sel = (ListView_GetItemState(g_hList, row,
+                                                          LVIS_SELECTED) & LVIS_SELECTED) != 0;
+
+                        /*
+                         * 只有选中行交还系统画：Win11 的选中底色由系统按用户
+                         * accent 动态生成，主题的 FILLCOLOR 属性只返回白色
+                         * （GetThemeColor 还是成功返回），自绘必然与相邻列色差。
+                         * 悬停行必须继续画徽章——若交还系统，鼠标扫过时徽章
+                         * 会突然退化成纯文字，整列形态跳变。
+                         */
+                        if (sel) {
+                            cd->clrText = CLR_DEFAULT;
+                            return CDRF_DODEFAULT;
+                        }
+                        DrawStateCell(cd->nmcd.hdc, cd->nmcd.rc,
+                                      &g_view[cd->nmcd.dwItemSpec],
+                                      cd->nmcd.dwItemSpec);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                    ApplyRowBg(cd);
+                    /* 非状态列必须显式恢复默认色：CDRF_NEWFONT 的颜色会串到后面的子项 */
+                    cd->clrText = CLR_DEFAULT;
+                    if ((size_t)cd->nmcd.dwItemSpec < g_viewCount) {
+                        const PORT_ENTRY *e = &g_view[cd->nmcd.dwItemSpec];
+                        if (cd->iSubItem == COL_RADDR && !e->remoteAddr[0]) {
+                            /* UDP/监听行没有远程端点，「—」占位符用浅灰弱化 */
+                            cd->clrText = RGB(182, 191, 204);
+                        }
                     }
                     return CDRF_NEWFONT;
                 }
@@ -2821,6 +4202,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 NMLVDISPINFOW *di = (NMLVDISPINFOW *)lp;
                 int item = di->item.iItem;
 
+                if ((di->item.mask & LVIF_IMAGE) &&
+                    item >= 0 && (size_t)item < g_viewCount) {
+                    di->item.iImage = IconIndexFor(&g_view[item]);
+                }
                 if ((di->item.mask & LVIF_TEXT) && di->item.pszText) {
                     if (item >= 0 && (size_t)item < g_viewCount) {
                         wcsncpy(di->item.pszText,
@@ -2833,11 +4218,49 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 return 0;
             }
-            if (hdr->code == LVN_ITEMCHANGED) {
-                NMLISTVIEW *nv = (NMLISTVIEW *)lp;
-                if ((nv->uChanged & LVIF_STATE) &&
-                    (nv->uNewState ^ nv->uOldState) & (LVIS_SELECTED | LVIS_FOCUSED)) {
-                    UpdateInfoBar();
+            if (hdr->code == LVN_GETINFOTIPW) {
+                /*
+                 * 行悬停信息：服务名（读系统 services 表，443→https 这种）+
+                 * 一行概要 + 映像路径。LVS_EX_INFOTIP 接管后 LABELTIP 不再
+                 * 单独工作，长路径在这里补上。
+                 */
+                NMLVGETINFOTIPW *tip = (NMLVGETINFOTIPW *)lp;
+                int item = tip->iItem;
+
+                if (item >= 0 && (size_t)item < g_viewCount) {
+                    const PORT_ENTRY *e = &g_view[item];
+                    WCHAR line[1024], tmp[512];
+                    const char *proto = (_wcsicmp(e->proto, L"UDP") == 0 ||
+                                         _wcsicmp(e->proto, L"UDP6") == 0) ? "udp" : "tcp";
+                    SERVENT *se = getservbyport(htons((unsigned short)(e->localPort & 0xFFFF)), proto);
+
+                    line[0] = 0;
+                    if (se && se->s_name) {
+                        WCHAR srvName[64];
+                        srvName[0] = 0;
+                        MultiByteToWideChar(CP_UTF8, 0, se->s_name, -1, srvName, 64);
+                        if (!srvName[0])
+                            MultiByteToWideChar(CP_ACP, 0, se->s_name, -1, srvName, 64);
+                        _snwprintf(tmp, 512, Tr(TXT_TIP_SRV), srvName);
+                        tmp[511] = 0;
+                        wcscat_s(line, 1024, tmp);
+                        wcscat_s(line, 1024, L"\n");
+                    }
+                    _snwprintf(tmp, 512, L"%s %s · %s · PID %s",
+                               e->proto, CellText(e, COL_LADDR),
+                               EntryStateText(e)[0] ? EntryStateText(e) : e->proto,
+                               e->pidText);
+                    tmp[511] = 0;
+                    wcscat_s(line, 1024, tmp);
+                    if (e->procPath[0]) {
+                        wcscat_s(line, 1024, L"\n");
+                        wcscat_s(line, 1024, e->procPath);
+                    } else {
+                        wcscat_s(line, 1024, L"\n");
+                        wcscat_s(line, 1024, Tr(TXT_TIP_NOPATH));
+                    }
+                    _snwprintf(tip->pszText, tip->cchTextMax, L"%s", line);
+                    tip->pszText[tip->cchTextMax - 1] = 0;
                 }
                 return 0;
             }
@@ -2866,19 +4289,20 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
         if (hdr->hwndFrom == ListView_GetHeader(g_hList) &&
+            hdr->code == NM_CUSTOMDRAW) {
+            NMCUSTOMDRAW *nmc = (NMCUSTOMDRAW *)lp;
+            if (nmc->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (nmc->dwDrawStage == CDDS_ITEMPREPAINT) {
+                DrawFlatHeader(nmc, g_sortCol, g_sortAsc);
+                return CDRF_SKIPDEFAULT;
+            }
+            return CDRF_DODEFAULT;
+        }
+        if (hdr->hwndFrom == ListView_GetHeader(g_hList) &&
             (hdr->code == HDN_ENDTRACKW || hdr->code == HDN_DIVIDERDBLCLICKW)) {
             NMHEADERW *header = (NMHEADERW *)lp;
             if (header->iItem >= 0 && header->iItem < COL_COUNT)
                 g_colUserSized[header->iItem] = 1;
-            return 0;
-        }
-        if (hdr->hwndFrom == g_hStatus && hdr->code == NM_CLICK && !ProcIsElevated()) {
-            NMMOUSE *mouse = (NMMOUSE *)lp;
-            int parts[2] = {0, 0};
-            if (SendMessageW(g_hStatus, SB_GETPARTS, 2, (LPARAM)parts) >= 2 &&
-                mouse->pt.x >= parts[0]) {
-                ConfirmElevate(hwnd);
-            }
             return 0;
         }
         break;
@@ -2890,6 +4314,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ApplyView(FALSE);
         } else if (wp == ID_TIMER) {
             ReloadAndApply();
+        } else if (wp == ID_HL_TIMER) {
+            InvalidateRect(g_hList, NULL, FALSE);
+            ManageHighlightTimer();   /* 高亮全部褪色后自动停表 */
         } else if (wp == ID_KILL_TIMER) {
             SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)Tr(TXT_BAR_KILLING));
         }
@@ -2912,21 +4339,23 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         KillTimer(hwnd, ID_TIMER);
         KillTimer(hwnd, ID_FILTER_TIMER);
         KillTimer(hwnd, ID_KILL_TIMER);
-        g_hInfoBar = NULL;
+        KillTimer(hwnd, ID_HL_TIMER);
+        SaveUiPrefs();
+        WSACleanup();
         free(g_all);
         free(g_view);
         g_all = NULL;
         g_view = NULL;
         if (g_hFont) DeleteObject(g_hFont);
-        if (g_hRowSpacer) { ImageList_Destroy(g_hRowSpacer); g_hRowSpacer = NULL; }
-        if (g_hQueryBrush) { DeleteObject(g_hQueryBrush); g_hQueryBrush = NULL; }
-        if (g_hQueryLineBrush) { DeleteObject(g_hQueryLineBrush); g_hQueryLineBrush = NULL; }
+        if (g_hIcons) { ImageList_Destroy(g_hIcons); g_hIcons = NULL; }
+        if (g_hMenuBar) { DestroyMenu(g_hMenuBar); g_hMenuBar = NULL; }
         PostQuitMessage(0);
         return 0;
     }
 
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
+
 
 int UiRun(HINSTANCE hInst, int nCmdShow)
 {
@@ -2935,11 +4364,17 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     MSG msg;
     HACCEL hAccel;
     ACCEL accels[10];
-    HMENU menu;
     UINT dpi;
+    RECT savedRc;
+    BOOL startMaximized = FALSE;
+    WSADATA wsa;
 
     g_hInst = hInst;
     LoadLanguagePreference();
+    ParseCommandLineArgs();
+    LoadUiPrefs(&savedRc, &startMaximized);
+    /* 服务名提示用 getservbyport，失败只影响这一项提示，不阻塞启动 */
+    WSAStartup(MAKEWORD(2, 2), &wsa);
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
@@ -2976,20 +4411,33 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
         if (p) dpi = p();
     }
 
-    menu = BuildMainMenu();
-    if (!menu) return 1;
+    if (!RegisterToolbar(hInst)) return 1;
+    if (!RegisterClearBtn(hInst)) return 1;
+
+    g_hMenuBar = BuildMainMenu();
 
     hwnd = CreateWindowExW(0, MAIN_CLASS, Tr(TXT_WINDOW),
                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                           CW_USEDEFAULT, CW_USEDEFAULT,
-                           MulDiv(980, (int)dpi, 96), MulDiv(620, (int)dpi, 96),
-                           NULL, menu, hInst, NULL);
-    if (!hwnd) { DestroyMenu(menu); return 1; }
+                           savedRc.left >= 0 ? savedRc.left : CW_USEDEFAULT,
+                           savedRc.top >= 0 ? savedRc.top : CW_USEDEFAULT,
+                           savedRc.left >= 0 ? savedRc.right - savedRc.left : MulDiv(980, (int)dpi, 96),
+                           savedRc.top >= 0 ? savedRc.bottom - savedRc.top : MulDiv(620, (int)dpi, 96),
+                           NULL, NULL, hInst, NULL);
+    if (!hwnd) {
+        if (g_hMenuBar) DestroyMenu(g_hMenuBar);
+        return 1;
+    }
 
     SyncFilterMenu();
 
-    ShowWindow(hwnd, nCmdShow);
+    ShowWindow(hwnd, startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(hwnd);
+
+    /* 上次退出时开着置顶，这次继续钉在最前 */
+    if (g_topmost) {
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 
     accels[0].fVirt = FVIRTKEY;
     accels[0].key = VK_F5;
@@ -3011,7 +4459,11 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
     accels[4].key = 'R';
     accels[4].cmd = IDM_AUTO;
 
-    hAccel = CreateAcceleratorTableW(accels, 5);
+    accels[5].fVirt = FVIRTKEY | FCONTROL;
+    accels[5].key = 'S';
+    accels[5].cmd = IDM_EXPORT;
+
+    hAccel = CreateAcceleratorTableW(accels, 6);
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         HWND focus = GetFocus();
@@ -3030,6 +4482,13 @@ int UiRun(HINSTANCE hInst, int nCmdShow)
         }
         if (listKey && msg.wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
             SendMessageW(hwnd, WM_COMMAND, IDM_COPY_PATH, 0);
+            continue;
+        }
+        /* 菜单栏撤掉后，Alt+F / Alt+L 两个助记键由这里接住，行为不变 */
+        if (msg.message == WM_SYSKEYDOWN &&
+            (msg.lParam & (1 << 29)) &&
+            (msg.wParam == 'F' || msg.wParam == 'L')) {
+            ToolbarPopup(msg.wParam == 'F' ? TBB_FILTER : TBB_LANG);
             continue;
         }
         if (!hAccel || !TranslateAcceleratorW(hwnd, hAccel, &msg)) {

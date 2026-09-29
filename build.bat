@@ -18,7 +18,7 @@ if errorlevel 1 goto :fail
 link /nologo /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:WINDOWS ^
      /OUT:build\PortView.exe ^
      build\main.obj build\ports.obj build\proc.obj build\ui.obj build\app.res ^
-     user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib iphlpapi.lib ws2_32.lib psapi.lib uxtheme.lib
+     user32.lib gdi32.lib comctl32.lib shell32.lib advapi32.lib iphlpapi.lib ws2_32.lib psapi.lib uxtheme.lib comdlg32.lib
 if errorlevel 1 goto :fail
 
 echo.
